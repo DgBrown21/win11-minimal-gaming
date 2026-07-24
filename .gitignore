@@ -1,0 +1,17 @@
+# The ISO itself (and the pristine original Microsoft ISO it's built from,
+# plus the intermediate extracted/mounted working files) are never committed
+# here — multi-gigabyte binaries don't belong in git, GitHub hard-caps
+# individual files at 100MB anyway, and redistributing Microsoft's own
+# install media isn't something this repo does. Build your own from source
+# with build-windows.ps1; see README.md.
+*.iso
+*.wim
+*.esd
+build/
+mount/
+
+# VM test scratch (test VHDX disks, DISM apply logs, clipboard screenshots
+# from the Hyper-V boot-testing session) and root-level build run logs —
+# none of this is build output that belongs in the repo.
+vm/
+*.log

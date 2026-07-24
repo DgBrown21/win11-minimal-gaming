@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  autounattend.xml — Windows 11 Pro unattended install answer file, for the
+  Win11-Minimal-DB gaming-focused minimal build.
+
+  Adapted from the sibling Win11-Install project's answer file. Same
+  hardware-check bypass, locale, and OOBE-skip mechanics. Two deliberate
+  differences from the sibling:
+
+    1. Only ONE first-boot script is staged (first-boot-tweaks.ps1) — no
+       personalization/app-install scripts beyond Steam, because this
+       project does the heavy debloating offline at the image level
+       (slim-image.ps1, run during the build, before this ISO even exists)
+       rather than live at first login.
+    2. Boots straight to desktop with no login screen at all: the account
+       ("Gamer") has a blank password (required so unattended Setup doesn't
+       stop and wait at a password prompt) and first-boot-tweaks.ps1 turns
+       on Windows autologon for it. Same safety property the blank
+       password already relies on — Windows restricts blank-password
+       accounts to console/physical logon only, never network — so
+       autologon on top of that carries no meaningful additional risk.
+       Set a real password later via Settings if you want one; autologon
+       simply stops working at that point (expected, not a bug).
+
+  What this DELIBERATELY DOES NOT automate: disk partitioning/target
+  selection. Setup will still show the normal "Where do you want to install
+  Windows?" screen and wait for you to pick the drive — this answer file was
+  written without knowing the target machine's disk layout, and scripting
+  that step blind risks wiping the wrong disk. Everything before and after
+  that one screen is unattended.
+
+  To use: copy this file to the ROOT of your installer USB (same level as
+  "sources", "boot", "efi" folders) — Setup auto-detects it there. If
+  you're using the pre-remastered ISO instead, it's already baked in.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <SetupUILanguage>
+        <UILanguage>en-GB</UILanguage>
+      </SetupUILanguage>
+      <InputLocale>en-GB</InputLocale>
+      <SystemLocale>en-GB</SystemLocale>
+      <UILanguage>en-GB</UILanguage>
+      <UserLocale>en-GB</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+      <!--
+        Hardware requirement bypass — the standard, widely-documented
+        LabConfig registry technique (the same one Rufus's "Extended
+        Windows 11 Installation" option applies). Runs before Setup's own
+        hardware check gates the "Install Now" flow. No vTPM, no Secure
+        Boot dependency — matches a real machine that has neither, rather
+        than papering over it with emulated hardware.
+      -->
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>cmd /c reg add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Path>cmd /c reg add HKLM\SYSTEM\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Path>cmd /c reg add HKLM\SYSTEM\Setup\LabConfig /v BypassRAMCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Path>cmd /c reg add HKLM\SYSTEM\Setup\LabConfig /v BypassStorageCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <Path>cmd /c reg add HKLM\SYSTEM\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>6</Order>
+          <Path>cmd /c reg add HKLM\SYSTEM\Setup\LabConfig /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <!-- No product key: installs unactivated, activate later with a
+             real key from Settings > Activation whenever you want to. -->
+      </UserData>
+
+      <!-- The slimmed install.wim/install.esd this project builds only
+           carries a single index (Windows 11 Pro) — see slim-image.ps1 —
+           so there's no edition-picker screen to skip here regardless.
+           Disk target selection is left untouched below (no
+           <DiskConfiguration> block) so Setup still asks you which drive,
+           on purpose — see file header. -->
+      <ImageInstall>
+        <OSImage>
+          <InstallFrom>
+            <MetaData wcm:action="add">
+              <Key>/IMAGE/NAME</Key>
+              <Value>Windows 11 Pro</Value>
+            </MetaData>
+          </InstallFrom>
+        </OSImage>
+      </ImageInstall>
+
+    </component>
+  </settings>
+
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <ComputerName>DESKTOP-MIN11</ComputerName>
+      <TimeZone>GMT Standard Time</TimeZone>
+    </component>
+  </settings>
+
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <InputLocale>en-GB</InputLocale>
+      <SystemLocale>en-GB</SystemLocale>
+      <UILanguage>en-GB</UILanguage>
+      <UserLocale>en-GB</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Home</NetworkLocation>
+        <SkipMachineOOBE>true</SkipMachineOOBE>
+        <SkipUserOOBE>true</SkipUserOOBE>
+        <!-- 3 = "Send required diagnostic data only" (the lowest tier this
+             OOBE screen offers) — set here so the prompt itself never
+             appears. Windows Update itself is aggressively disabled by
+             first-boot-tweaks.ps1 in this project (unlike the sibling
+             project, which protects it) — diagnostic data tier is
+             unrelated to that and stays at the lowest floor regardless. -->
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+
+      <!-- Local Administrator account "Gamer", blank password (required so
+           unattended Setup does not stop at a password prompt, and what
+           makes autologon below safe: blank-password accounts are
+           console/physical logon only, never network). Set a real
+           password later via Settings if wanted; autologon just stops
+           working at that point. -->
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>Gamer</Name>
+            <Group>Administrators</Group>
+            <Password>
+              <Value></Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+      <AutoLogon>
+        <Enabled>false</Enabled>
+        <!-- Left disabled HERE on purpose - first-boot-tweaks.ps1 turns
+             autologon on itself after confirming the account exists, to
+             avoid two mechanisms fighting over the same Winlogon keys
+             during OOBE finalize. Boots straight to desktop, no login
+             screen. -->
+      </AutoLogon>
+
+      <!-- Runs once at first login, with administrative rights (this
+           happens during OOBE finalize, before any UAC-prompting
+           interactive desktop session exists). Staged onto the install
+           media at sources\$OEM$\$$\Setup\Scripts\, which Windows Setup
+           copies to C:\Windows\Setup\Scripts\ automatically — see
+           build-windows.ps1 for how that folder is laid out. -->
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <RequiresUserInput>false</RequiresUserInput>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Windows\Setup\Scripts\first-boot-tweaks.ps1"</CommandLine>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+
+    </component>
+  </settings>
+
+</unattend>
