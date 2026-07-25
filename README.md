@@ -67,12 +67,26 @@ language stripping) is possible in a later pass if needed.
   password accounts to console/physical logon only, never network. Set a
   real password later via Settings if you want one; autologon simply stops
   working at that point (expected, not a bug).
-- **Steam, installed and set to autostart into Big Picture** via
-  `first-boot-tweaks.ps1` (winget, falling back to the official installer).
-  A Startup-folder shortcut launches Big Picture once the desktop is
-  reached — combined with autologon above, the machine goes power-on straight
-  to Steam Big Picture with no manual steps. Big Picture's own
-  "Exit to Desktop" always gets you to a normal desktop.
+- **Steam, installed and boots straight into Big Picture via a Game Mode
+  shell** — `first-boot-tweaks.ps1` installs Steam (winget, falling back to
+  the official installer), then registers `game-mode-shell.ps1` as the
+  Windows shell (`Winlogon\Shell`, in place of `explorer.exe`) instead of
+  just autostarting Big Picture on top of a normal desktop. The shell
+  script launches `explorer.exe` itself first (so a real desktop still
+  exists underneath) and then Big Picture on top — combined with autologon
+  above, the machine goes power-on straight to Steam Big Picture, SteamOS/
+  Deck-style. Big Picture's own "Exit to Desktop" reveals the desktop
+  that's already running; a **"Game Mode" icon on the desktop** jumps back
+  into Big Picture at any time. See `game-mode-shell.ps1`'s header for the
+  full mechanism and the Safe Mode recovery command if this ever needs
+  reverting on an already-imaged machine.
+- **Telemetry services/tasks and gaming performance tweaks** — data lifted
+  from Winhance (memstechtips/Winhance) and AtlasOS (Atlas-OS/Atlas): the
+  usual telemetry services (`DiagTrack`, `dmwappushservice`, `PcaSvc`, etc.)
+  and CEIP/diagnostic scheduled tasks disabled, plus `Win32PrioritySeparation`,
+  HAGS, Game Mode, and Game DVR/overlay tweaks. Applied by
+  `first-boot-tweaks.ps1`, live, alongside the WU/Edge/OneDrive work it
+  already did.
 
 ## What this deliberately does NOT do
 
@@ -139,7 +153,8 @@ language stripping) is possible in a later pass if needed.
 | `build-windows.ps1` | Fetches the official Microsoft ISO, extracts it, runs `slim-image.ps1`, injects the answer file + first-boot script, rebuilds with `oscdimg`. |
 | `slim-image.ps1` | The core size-reduction work — offline DISM servicing against `install.wim`. Can be re-run standalone against an already-extracted `build\extracted` folder while iterating, without re-downloading the source ISO. |
 | `autounattend.xml` | The unattended answer file. |
-| `first-boot-tweaks.ps1` | Edge/OneDrive removal, Windows Update disable, Defender safety net — runs once at first login. |
+| `first-boot-tweaks.ps1` | Edge/OneDrive removal, Windows Update disable, Defender safety net, telemetry/gaming-perf tweaks, Game Mode shell setup — runs once at first login. |
+| `game-mode-shell.ps1` | Registered as the Windows shell in place of `explorer.exe` — boots straight into Steam Big Picture, SteamOS/Deck-style. Staged onto the ISO by `build-windows.ps1`, installed by `first-boot-tweaks.ps1`. |
 | `Win11-Minimal.iso` | **Not in this repo** — build artifact, see `.gitignore`. Build it yourself; redistributing Microsoft's install media isn't something this repo does. |
 
 ## Requirements to build
@@ -158,3 +173,12 @@ a "path already mounted" error before that, run manually first:
 ```powershell
 dism /Cleanup-Mountpoints
 ```
+
+If the **Game Mode shell** ever fails to reach a usable desktop on an
+already-imaged machine (a bad edit to `game-mode-shell.ps1`, Steam moved,
+etc.), boot to Safe Mode / Safe Mode with Command Prompt and run:
+```
+reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Shell /t REG_SZ /d explorer.exe /f
+```
+then reboot normally — this reverts to a plain `explorer.exe` desktop with
+no Big Picture autostart; Steam can still be launched manually from there.

@@ -151,6 +151,101 @@ New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\
 Write-Log "  Set NoAutoUpdate policy = 1."
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 3b. TELEMETRY — services & scheduled tasks
+# ═══════════════════════════════════════════════════════════════════════════
+# Data lifted from Winhance (memstechtips/Winhance, PolyForm Shield license —
+# reg key/service names only, not their code) and AtlasOS (Atlas-OS/Atlas,
+# GPLv3) — this project previously only touched Edge/OneDrive/WU, never
+# general telemetry. WU/Defender's own services and task trees are
+# deliberately never referenced here, same separation the rest of this file
+# already relies on.
+Write-Log "=== Telemetry services & scheduled tasks ==="
+foreach ($svc in @("DiagTrack", "dmwappushservice", "OneSyncSvc", "PcaSvc", "WerSvc", "wercplsupport", "diagnosticshub.standardcollector.service")) {
+    Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+    Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+}
+Write-Log "  Disabled telemetry services (DiagTrack, dmwappushservice, OneSyncSvc, PcaSvc, WerSvc, wercplsupport, diagnosticshub.standardcollector.service)."
+$TelemetryTasks = @(
+    @{Path = "\Microsoft\Windows\Application Experience\"; Name = "Microsoft Compatibility Appraiser"}
+    @{Path = "\Microsoft\Windows\Application Experience\"; Name = "ProgramDataUpdater"}
+    @{Path = "\Microsoft\Windows\Application Experience\"; Name = "PcaPatchDbTask"}
+    @{Path = "\Microsoft\Windows\Application Experience\"; Name = "StartupAppTask"}
+    @{Path = "\Microsoft\Windows\Customer Experience Improvement Program\"; Name = "Consolidator"}
+    @{Path = "\Microsoft\Windows\Customer Experience Improvement Program\"; Name = "UsbCeip"}
+    @{Path = "\Microsoft\Windows\Customer Experience Improvement Program\"; Name = "KernelCeipTask"}
+    @{Path = "\Microsoft\Windows\DiskDiagnostic\"; Name = "Microsoft-Windows-DiskDiagnosticDataCollector"}
+    @{Path = "\Microsoft\Windows\Feedback\Siuf\"; Name = "DmClient"}
+    @{Path = "\Microsoft\Windows\Feedback\Siuf\"; Name = "DmClientOnScenarioDownload"}
+    @{Path = "\Microsoft\Windows\Windows Error Reporting\"; Name = "QueueReporting"}
+    @{Path = "\Microsoft\Windows\AppxDeploymentClient\"; Name = "UCPD velocity"}
+    @{Path = "\Microsoft\Windows\Flighting\FeatureConfig\"; Name = "UsageDataReporting"}
+)
+foreach ($t in $TelemetryTasks) {
+    Get-ScheduledTask -TaskPath $t.Path -TaskName $t.Name -ErrorAction SilentlyContinue |
+        Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+}
+Write-Log "  Disabled telemetry/CEIP scheduled tasks."
+New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Force -ErrorAction SilentlyContinue | Out-Null
+foreach ($kv in @{ AllowTelemetry = 0; MaxTelemetryAllowed = 0 }.GetEnumerator()) {
+    New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name $kv.Key -Value $kv.Value -PropertyType DWord -Force | Out-Null
+}
+New-ItemProperty -Path "HKCU:\SOFTWARE\Policies\Microsoft\Windows\AppCompat" -Name "AITEnable" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+# EventTranscript is the always-on diagnostic logging pipe that keeps
+# running even with AllowTelemetry=0 (Windows 11 Pro's real floor — see the
+# sibling Win11-Install project's debloat-lockdown.ps1 header for why 0
+# doesn't mean 0 on this edition). Disabling the autologger stops it from
+# writing at all rather than just asking nicely via policy.
+New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\EventLog\EventTranscript" -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\EventLog\EventTranscript" -Name "EnableEventTranscript" -Value 0 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\Diagtrack-Listener" -Name "Start" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+Write-Log "  Set telemetry registry policy (AllowTelemetry, EventTranscript, Diagtrack-Listener autologger)."
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3c. GAMING PERFORMANCE TWEAKS
+# ═══════════════════════════════════════════════════════════════════════════
+# Data lifted from Winhance's GamingAndPerformanceOptimizations — reg key
+# names/values only, applied here as plain PowerShell.
+Write-Log "=== Gaming performance tweaks ==="
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 38 -PropertyType DWord -Force | Out-Null
+$GamesTaskPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"
+New-Item -Path $GamesTaskPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $GamesTaskPath -Name "Priority" -Value 6 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -Path $GamesTaskPath -Name "GPU Priority" -Value 8 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -Path $GamesTaskPath -Name "Scheduling Category" -Value "High" -PropertyType String -Force | Out-Null
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -Value 2 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+New-Item -Path "HKCU:\Software\Microsoft\GameBar" -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKCU:\Software\Microsoft\GameBar" -Name "AutoGameModeEnabled" -Value 1 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -Path "HKCU:\Software\Microsoft\GameBar" -Name "UseNexusForGameBarEnabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKCU:\Software\Microsoft\GameBar" -Name "ShowStartupPanel" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+# Game DVR/Game Bar overlay off — pure capture/telemetry overhead on a
+# machine that's already going straight into Steam.
+New-Item -Path "HKCU:\System\GameConfigStore" -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_Enabled" -Value 0 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -Path "HKCU:\System\GameConfigStore" -Name "GameDVR_FSEBehaviorMode" -Value 2 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" -Name "AppCaptureEnabled" -Value 0 -PropertyType DWord -Force | Out-Null
+New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name "AllowGameDVR" -Value 0 -PropertyType DWord -Force | Out-Null
+Write-Log "  Set Win32PrioritySeparation/Games task priority, HAGS, Game Mode, Game DVR/Bar-overlay off, fullscreen optimizations."
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3d. FOOTPRINT REDUCTION — non-gaming Automatic services
+# ═══════════════════════════════════════════════════════════════════════════
+# Measured via a live process/service audit on the test VM (2026-07-25):
+# ~97 processes / 2.28GB just for the OS + a not-yet-fully-loaded Steam.
+# These are Automatic-start services with no gaming relevance, confirmed
+# present in that audit's running-services list. Explicitly NOT touched:
+# webthreatdefusersvc (Defender SmartScreen — this project's Defender
+# safety net covers it) and WpnService/WpnUserService (Defender alert
+# toasts may depend on push notifications).
+Write-Log "=== Footprint reduction: non-gaming services ==="
+foreach ($svc in @("TrkWks", "SysMain", "Spooler", "CDPSvc", "CDPUserSvc")) {
+    Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+    Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+}
+Write-Log "  Disabled: TrkWks (link tracking), SysMain (Superfetch — SSD-era gaming boxes gain little from it), Spooler (no printer use case), CDPSvc/CDPUserSvc (Phone Link / Connected Devices — measured ~47MB via CrossDeviceResume alone)."
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 4. SAFETY NET — confirm Windows Defender is untouched
 # ═══════════════════════════════════════════════════════════════════════════
 # Not a "change" — this only ever pushes Defender's services/tasks back to
@@ -197,18 +292,71 @@ if (-not (Test-Path $steamExe)) {
 }
 if (Test-Path $steamExe) {
     Write-Log "  Steam installed at $steamExe"
-    $StartupDir = [Environment]::GetFolderPath("Startup")
-    $SteamShortcut = Join-Path $StartupDir "Steam - Big Picture.lnk"
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($SteamShortcut)
-    $shortcut.TargetPath = $steamExe
-    $shortcut.Arguments = "-start steam://open/bigpicture"
-    $shortcut.WorkingDirectory = Split-Path $steamExe
-    $shortcut.Description = "Steam Big Picture (auto-start)"
-    $shortcut.Save()
-    Write-Log "  Created Big Picture autostart shortcut: $SteamShortcut"
 } else {
     Write-Log "  Steam install could not be confirmed — check the log and install manually if needed." "Red"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5a. GAME MODE SHELL — replaces explorer.exe as the Winlogon shell
+# ═══════════════════════════════════════════════════════════════════════════
+# REVERSAL from this project's original design: explorer.exe used to stay
+# the registered shell, with Steam Big Picture just autostarting via a
+# Startup-folder shortcut on top of it (still what the sibling Win11-Install
+# project's README used to say too). This now does a real shell swap so the
+# machine boots straight into Big Picture, SteamOS-Deck-style, instead of
+# landing on a bare desktop first. See game-mode-shell.ps1's own header for
+# the full mechanism and the Safe Mode recovery command if this ever needs
+# undoing on a machine that's already been imaged.
+#
+# Researched but not vendored: LifeDreamer24/SteamOS-Shell, jazir555/
+# GamesDows, quangmach/GameLauncherShell — all three are small batch/
+# VBScript hobby projects, none with a working "jump back into Game Mode
+# from the desktop" flow. GamesDows' pre-launch-explorer-hidden technique
+# is what game-mode-shell.ps1 borrows (as a technique, not as code — GPLv3,
+# not copied); the return-to-Game-Mode piece is simpler than any of them
+# attempt: Steam already takes over the screen again on
+# `steam://open/bigpicture`, so a plain desktop shortcut is enough.
+Write-Log "=== Game Mode shell ==="
+$WinlogonPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+if (Test-Path $steamExe) {
+    try {
+        $GameModeDir = Join-Path $env:ProgramData "GameMode"
+        New-Item -ItemType Directory -Path $GameModeDir -Force | Out-Null
+        $SourceShellScript = "C:\Windows\Setup\Scripts\game-mode-shell.ps1"
+        $GameModeShellScript = Join-Path $GameModeDir "GameModeShell.ps1"
+        Copy-Item -Path $SourceShellScript -Destination $GameModeShellScript -Force
+        Set-ItemProperty -Path $WinlogonPath -Name "Shell" -Value "powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$GameModeShellScript`""
+        Write-Log "  Registered $GameModeShellScript as the Winlogon shell."
+
+        # The desktop shortcut can't just launch Steam directly — it also
+        # has to flip the persisted mode file back to "game" (see
+        # game-mode-shell.ps1's header), or a later reboot would still
+        # honor a stale "desktop" state from the last time Big Picture was
+        # exited. A tiny .cmd wrapper keeps that logic out of the .lnk
+        # itself.
+        $EnterGameModeScript = Join-Path $GameModeDir "Enter-GameMode.cmd"
+        @"
+@echo off
+> "%ProgramData%\GameMode\mode.txt" echo game
+start "" "$steamExe" -start steam://open/bigpicture
+"@ | Set-Content -Path $EnterGameModeScript -Encoding ASCII
+
+        $PublicDesktop = Join-Path $env:PUBLIC "Desktop"
+        $GameModeShortcut = Join-Path $PublicDesktop "Game Mode.lnk"
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($GameModeShortcut)
+        $shortcut.TargetPath = $EnterGameModeScript
+        $shortcut.WorkingDirectory = Split-Path $steamExe
+        $shortcut.IconLocation = $steamExe
+        $shortcut.WindowStyle = 7  # minimized - the .cmd window shouldn't be visible
+        $shortcut.Description = "Return to Game Mode (Steam Big Picture)"
+        $shortcut.Save()
+        Write-Log "  Created 'Game Mode' desktop shortcut: $GameModeShortcut -> $EnterGameModeScript"
+    } catch {
+        Write-Log "  Failed to set up the Game Mode shell (non-fatal — explorer.exe remains the shell, Steam must be launched manually): $_" "Red"
+    }
+} else {
+    Write-Log "  Skipping Game Mode shell setup — Steam was not confirmed installed." "Yellow"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
