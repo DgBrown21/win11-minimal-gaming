@@ -6,12 +6,8 @@ offline), no OneDrive, no bundled apps/features beyond what a gaming box
 needs, aggressively telemetry-free, a performance power plan by default,
 Windows Defender kept working, Windows Update disabled. Boots straight into
 Steam Big Picture with explorer.exe still the real shell. Built for
-bare-metal installs on hardware without Secure Boot/TPM enforcement.
-
-## License
-
-Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free
-to use, modify, and share for any noncommercial purpose.
+bare-metal installs on hardware without Secure Boot/TPM enforcement. The
+built ISO is **~5.5 GB**, down from the ~7.9 GB official source.
 
 ---
 
@@ -50,20 +46,6 @@ different reliability characteristics:
   **telemetry-off / privacy** pass, footprint-reducing service disables, a
   **performance power plan**, and confirming Windows Defender still works
   (all live service/scheduled-task/registry state, not image content).
-
-## Honest size expectations
-
-**The target is ~3GB, down from a stock ~8.4GB ISO — treat this as a
-stretch goal, not a guarantee.** Aggressive component removal (single-
-index export + Appx/capability/feature strip + `/ResetBase`) combined with
-ESD/LZMS recompression on a full Windows 11 Pro image realistically lands
-somewhere in the **3.5-4.5GB range** for a build like this one, which
-deliberately keeps Windows Defender working, keeps gaming-relevant
-Xbox/runtime components installed, and skips driver-package pruning (all
-of which cost some of the size more aggressive "core-only" builds save
-elsewhere). If the first build lands at 4GB instead of 3GB, that's the
-expected outcome, not a bug — going further (driver pruning, stricter
-language stripping) is possible in a later pass if needed.
 
 ## What's included beyond the OS trim
 
@@ -124,46 +106,83 @@ language stripping) is possible in a later pass if needed.
 
 ---
 
-## Quick start
+## Install & build
 
-1. **Build the ISO** (Windows only for now — needs the free [Windows ADK
-   "Deployment Tools" feature](https://learn.microsoft.com/windows-hardware/get-started/adk-install)
-   for `oscdimg.exe`, and must run as **Administrator** since the
-   slimming stage needs `Mount-WindowsImage`/DISM):
-   ```powershell
-   .\build-windows.ps1
-   ```
-   Needs roughly **40GB free scratch space** and **1.5-2.5 hours**,
-   dominated by the `/ResetBase` component cleanup and the final WIM→ESD
-   compression pass (both CPU-bound). Produces `Win11-Minimal.iso`.
+Windows only. Needs **Administrator** (the slimming stage uses
+`Mount-WindowsImage`/DISM), about **40 GB free scratch space**, and
+**1.5–2.5 hours** — dominated by the `/ResetBase` cleanup and the final
+WIM→ESD compression (both CPU-bound). Every command below is in its own block
+so it can be copied with one click.
 
-2. **Boot-test in a VM before touching any real hardware.** Windows 11 Pro
-   already includes Hyper-V:
-   ```powershell
-   Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All
-   ```
-   Create a **Generation 2** VM (matches real UEFI boot), 4GB+ RAM, attach
-   `Win11-Minimal.iso`, and boot through the full unattended flow. Check:
-   - OOBE runs unattended up to the disk-selection screen, completes
-     cleanly after a disk is picked.
-   - Boots straight to desktop on the local account via autologon, no login
-     screen, then Steam Big Picture launches automatically.
-   - `install.esd` was actually readable by Setup (this is the one claim
-     in this project that's "should work" rather than independently
-     proven elsewhere — the VM test is where it gets confirmed).
-   - Windows Security shows Defender "protected"; `Get-Service WinDefend`
-     → `Running`.
-   - Windows Update shows as disabled.
-   - `Get-WindowsOptionalFeature -Online -FeatureName NetFx3` shows
-     `Enabled` (confirms it was baked in correctly, since WU can't fetch
-     it on demand here).
+### 1. Get the code
 
-3. **Only after the VM test passes cleanly**, flash to USB ("burn ISO as
-   an image" mode, not "extract files") and install on real hardware.
-   Real-hardware validation (actual GPU driver behavior, game installs,
-   controller/peripheral support) is something only a physical install can
-   prove — the VM test can't validate that, only that servicing didn't
-   break the base boot/PnP subsystem.
+With git:
+
+```powershell
+git clone https://github.com/DGBrown21/win11-minimal-gaming.git
+cd win11-minimal-gaming
+```
+
+No git? Download the ZIP from the repo's green **Code ▾ → Download ZIP**, extract
+it, then `cd` into the folder.
+
+### 2. Install the one build prerequisite (Windows ADK Deployment Tools)
+
+Provides `oscdimg.exe`. One-time:
+
+```powershell
+winget install --id Microsoft.WindowsADK -e --accept-package-agreements --accept-source-agreements
+```
+
+(Or install it manually — you only need the **Deployment Tools** feature:
+<https://learn.microsoft.com/windows-hardware/get-started/adk-install>.)
+
+### 3. Build the ISO
+
+Open an **elevated** PowerShell (Terminal/PowerShell "Run as administrator"), then:
+
+```powershell
+.\build-windows.ps1
+```
+
+It downloads the official Windows 11 ISO from Microsoft, slims it, and writes
+`Win11-Minimal.iso` in the repo folder. Move it wherever you like:
+
+```powershell
+Move-Item .\Win11-Minimal.iso $env:USERPROFILE\Downloads\
+```
+
+### 4. Boot-test in a VM before touching any real hardware
+
+Windows 11 Pro already includes Hyper-V — enable it (elevated), then reboot:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All
+```
+
+Create a **Generation 2** VM (matches real UEFI boot), 4 GB+ RAM, attach
+`Win11-Minimal.iso`, and boot through the full unattended flow. Check:
+
+- OOBE runs unattended up to the disk-selection screen, completes cleanly
+  after a disk is picked.
+- Boots straight to desktop on the local account via autologon, no login
+  screen, then Steam Big Picture launches automatically.
+- `install.esd` was actually readable by Setup (this is the one claim in this
+  project that's "should work" rather than independently proven elsewhere —
+  the VM test is where it gets confirmed).
+- Windows Security shows Defender "protected"; `Get-Service WinDefend` →
+  `Running`.
+- Windows Update shows as disabled.
+- `Get-WindowsOptionalFeature -Online -FeatureName NetFx3` shows `Enabled`
+  (confirms it was baked in correctly, since WU can't fetch it on demand here).
+
+### 5. Flash to real hardware (only after the VM test passes)
+
+Flash to USB in **"burn ISO as an image"** mode (not "extract files") and
+install. Real-hardware validation (actual GPU driver behavior, game installs,
+controller/peripheral support) is something only a physical install can prove —
+the VM test can't validate that, only that servicing didn't break the base
+boot/PnP subsystem.
 
 ---
 

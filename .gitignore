@@ -15,3 +15,9 @@ mount/
 # none of this is build output that belongs in the repo.
 vm/
 *.log
+
+# Local, machine-specific helper scripts (never committed): build-all.ps1 has
+# hardcoded C:\Users paths, and upload-to-nextcloud.ps1 targets a private
+# Nextcloud. The repo ships build-windows.ps1 as the portable build entry point.
+build-all.ps1
+upload-to-nextcloud.ps1
