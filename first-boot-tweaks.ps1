@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Win11-Minimal-DB first-boot cleanup: removes Edge/OneDrive, aggressively
+    Win11-Minimal-DB first-boot cleanup: Edge runtime guard + OneDrive remove, aggressively
     disables Windows Update, and confirms Windows Defender still works.
 
 .DESCRIPTION
@@ -11,10 +11,12 @@
     script only handles the handful of things that can't be done safely
     offline:
 
-      1. Microsoft Edge removal — a Win32 install baked in via its own
-         installer, not a provisioned Appx package. Offline DISM package
-         removal of Edge from a retail image is unsupported/unreliable;
-         the official uninstaller (used here) is the proven mechanism.
+      1. Microsoft Edge — now removed OFFLINE in slim-image.ps1 (Program
+         Files folders, SystemApps, provisioned Appx, SOFTWARE/SYSTEM hive
+         entries — everything) before the ISO ever exists. This script only
+         keeps a runtime guard that cleans per-user protocol associations
+         Windows may re-create at first boot, disables EdgeUpdate services/
+         tasks, and reasserts the reinstall block.
       2. OneDrive removal — same reasoning, same official-uninstaller
          approach.
       3. Windows Update — aggressively disabled. This is the one deliberate
@@ -75,21 +77,26 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 Write-Log "==== first-boot-tweaks.ps1 starting ===="
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. MICROSOFT EDGE — full removal
+# 1. MICROSOFT EDGE — runtime guard (offline removal is done in slim-image.ps1 STEP 6c)
 # ═══════════════════════════════════════════════════════════════════════════
-# WebView2 runtime is deliberately left alone — many unrelated apps
-# (including some Store apps and non-Microsoft software) silently depend on
-# it being present; removing it breaks things that have nothing to do with
-# the Edge browser itself.
-Write-Log "=== Microsoft Edge ==="
-$edgeSetup = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\*\Installer\setup.exe" -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-if ($edgeSetup) {
-    Start-Process $edgeSetup.FullName -ArgumentList "--uninstall --system-level --verbose-logging --force-uninstall" -Wait -ErrorAction SilentlyContinue
-    Write-Log "  Ran Edge uninstaller."
-} else {
-    Write-Log "  Edge installer not found (may already be removed or in a different path)." "Yellow"
-}
+# Edge is now deleted OFFLINE in slim-image.ps1 (folders, SystemApps, Appx
+# packages, and registry entries — all before the image ever boots). This
+# section is purely a runtime guard: it cleans up any per-user cruft that
+# Windows may re-create on first boot (protocol associations, lingering Appx
+# registrations), disables the EdgeUpdate services/tasks, and reasserts the
+# reinstall block. WebView2 runtime is left alone.
+Write-Log "=== Microsoft Edge (offline-removed; runtime guard) ==="
+# Per-user cleanup — Windows may re-register these at first boot
+@(
+    "HKCU:\SOFTWARE\Classes\microsoft-edge"
+    "HKCU:\SOFTWARE\Classes\MSEdgeHTM"
+    "HKCU:\SOFTWARE\Classes\MSEdgeHTML"
+    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ApplicationAssociationToast\MicrosoftEdge"
+) | ForEach-Object { Remove-Item -Path $_ -Recurse -Force -ErrorAction SilentlyContinue }
+# Remove any Edge Appx packages that re-registered at login
+Get-AppxPackage -AllUsers -Name "*MicrosoftEdge*" -ErrorAction SilentlyContinue |
+    Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+# Disable EdgeUpdate tasks and services
 Get-ScheduledTask -TaskName "MicrosoftEdgeUpdateTaskMachineCore*" -ErrorAction SilentlyContinue |
     Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
 Get-ScheduledTask -TaskName "MicrosoftEdgeUpdateTaskMachineUA*" -ErrorAction SilentlyContinue |
@@ -97,7 +104,17 @@ Get-ScheduledTask -TaskName "MicrosoftEdgeUpdateTaskMachineUA*" -ErrorAction Sil
 foreach ($svc in @("edgeupdate", "edgeupdatem")) {
     Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
 }
-Write-Log "  Disabled Edge update tasks/services."
+# Reassert the EdgeUpdate reinstall block live
+foreach ($euRoot in @(
+    "HKLM:\SOFTWARE\Microsoft\EdgeUpdate",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate"
+)) {
+    New-Item -Path $euRoot -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path $euRoot -Name "DoNotUpdateToEdgeWithChromium" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path $euRoot -Name "InstallDefault" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path $euRoot -Name "Install{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+}
+Write-Log "  Edge per-user associations cleaned; update tasks/services disabled; reinstall block asserted."
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 2. ONEDRIVE — full removal
@@ -179,6 +196,11 @@ $TelemetryTasks = @(
     @{Path = "\Microsoft\Windows\Windows Error Reporting\"; Name = "QueueReporting"}
     @{Path = "\Microsoft\Windows\AppxDeploymentClient\"; Name = "UCPD velocity"}
     @{Path = "\Microsoft\Windows\Flighting\FeatureConfig\"; Name = "UsageDataReporting"}
+    @{Path = "\Microsoft\Windows\Application Experience\"; Name = "AitAgent"}
+    @{Path = "\Microsoft\Windows\Autochk\"; Name = "Proxy"}
+    @{Path = "\Microsoft\Windows\PI\"; Name = "Sqm-Tasks"}
+    @{Path = "\Microsoft\Windows\Feedback\Siuf\"; Name = "DmClientOnScenarioDownload"}
+    @{Path = "\Microsoft\Windows\Clip\"; Name = "License Validation"}
 )
 foreach ($t in $TelemetryTasks) {
     Get-ScheduledTask -TaskPath $t.Path -TaskName $t.Name -ErrorAction SilentlyContinue |
@@ -199,6 +221,51 @@ New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\EventLog\EventTranscri
 New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\EventLog\EventTranscript" -Name "EnableEventTranscript" -Value 0 -PropertyType DWord -Force | Out-Null
 New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\WMI\Autologger\Diagtrack-Listener" -Name "Start" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
 Write-Log "  Set telemetry registry policy (AllowTelemetry, EventTranscript, Diagtrack-Listener autologger)."
+
+# Broader privacy/telemetry surface — reg names/values lifted from AtlasOS
+# (Atlas-OS/Atlas, GPLv3), Winhance (memstechtips/Winhance) and winutil
+# (ChrisTitusTech/winutil, MIT) — key/value names only, not their code.
+# Grouped by what they turn off; all machine-wide policy so they apply
+# regardless of which user logs in.
+Write-Log "=== Extended privacy/telemetry policy ==="
+$TelemetryPolicy = @(
+    # Advertising ID (per-app ad targeting)
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo";                 Name = "DisabledByGroupPolicy";              Value = 1 }
+    # Tailored experiences / diagnostic-data-driven suggestions
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent";                    Name = "DisableTailoredExperiencesWithDiagnosticData"; Value = 1 }
+    # Activity feed / Timeline upload
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System";                          Name = "EnableActivityFeed";                 Value = 0 }
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System";                          Name = "PublishUserActivities";              Value = 0 }
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System";                          Name = "UploadUserActivities";               Value = 0 }
+    # "Let websites provide locally relevant content" / location platform
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors";              Name = "DisableLocation";                    Value = 1 }
+    # Windows Error Reporting off entirely
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting";         Name = "Disabled";                           Value = 1 }
+    # Feedback prompts / notifications
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection";                  Name = "DoNotShowFeedbackNotifications";     Value = 1 }
+    # Handwriting/typing personalization data collection
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\InputPersonalization";                    Name = "RestrictImplicitTextCollection";     Value = 1 }
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\InputPersonalization";                    Name = "RestrictImplicitInkCollection";      Value = 1 }
+    # Speech model-update reporting / online speech
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Speech";                                  Name = "AllowSpeechModelUpdate";             Value = 0 }
+    # Cloud/AI: Copilot + Recall off (belt-and-suspenders; apps removed offline)
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot";                  Name = "TurnOffWindowsCopilot";              Value = 1 }
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI";                       Name = "DisableAIDataAnalysis";              Value = 1 }
+    # Ads in Settings/Start/Explorer, "get tips/suggestions"
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer";                        Name = "DisableSearchBoxSuggestions";        Value = 1 }
+)
+foreach ($p in $TelemetryPolicy) {
+    New-Item -Path $p.Path -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path $p.Path -Name $p.Name -Value $p.Value -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+}
+# Per-user advertising-ID + suggested-content (current user; Default hive is
+# handled offline in slim-image.ps1's CDM step).
+New-Item -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\AdvertisingInfo" -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\AdvertisingInfo" -Name "Enabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-338393Enabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-353694Enabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" -Name "SubscribedContent-353696Enabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+Write-Log "  Set extended privacy policy (ad ID, activity feed, location, WER, feedback, input/speech, Copilot/Recall, suggestions)."
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 3c. GAMING PERFORMANCE TWEAKS
@@ -229,6 +296,42 @@ New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" -Name
 Write-Log "  Set Win32PrioritySeparation/Games task priority, HAGS, Game Mode, Game DVR/Bar-overlay off, fullscreen optimizations."
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 3c-p. POWER PLAN — Ultimate/High Performance as the default
+# ═══════════════════════════════════════════════════════════════════════════
+# A console-style gaming box should never down-clock or sleep mid-session.
+# Ultimate Performance (fixed GUID e9a42b02-… — hidden by default, so it's
+# duplicated in first to make it selectable) is preferred; if this SKU
+# doesn't expose it, fall back to High Performance (SCHEME_MIN). Then pin
+# never-sleep / never-display-off and kill USB selective suspend (a common
+# cause of controller/headset dropouts).
+Write-Log "=== Power plan (performance) ==="
+$ultimateGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61"
+& powercfg /duplicatescheme $ultimateGuid 2>$null | Out-Null
+$active = & powercfg /setactive $ultimateGuid 2>$null
+if ($LASTEXITCODE -ne 0) {
+    & powercfg /setactive SCHEME_MIN 2>$null | Out-Null   # High performance
+    Write-Log "  Ultimate Performance unavailable on this SKU — set High Performance." "Yellow"
+} else {
+    Write-Log "  Set Ultimate Performance as the active power plan."
+}
+# Applies to whichever plan is now active (AC + DC): no sleep, no display
+# blank, no disk spindown, no USB selective suspend, no hibernate.
+& powercfg /change standby-timeout-ac 0   | Out-Null
+& powercfg /change standby-timeout-dc 0   | Out-Null
+& powercfg /change monitor-timeout-ac 0   | Out-Null
+& powercfg /change monitor-timeout-dc 0   | Out-Null
+& powercfg /change disk-timeout-ac 0      | Out-Null
+& powercfg /change disk-timeout-dc 0      | Out-Null
+& powercfg /change hibernate-timeout-ac 0 | Out-Null
+& powercfg /change hibernate-timeout-dc 0 | Out-Null
+& powercfg /hibernate off 2>$null | Out-Null
+# USB selective suspend off (2a737441-… USB settings subgroup, 48e6b7a6-… setting)
+& powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 | Out-Null
+& powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 | Out-Null
+& powercfg /setactive SCHEME_CURRENT | Out-Null
+Write-Log "  Pinned never-sleep / never-display-off / no USB selective suspend / hibernate off."
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 3d. FOOTPRINT REDUCTION — non-gaming Automatic services
 # ═══════════════════════════════════════════════════════════════════════════
 # Measured via a live process/service audit on the test VM (2026-07-25):
@@ -239,11 +342,41 @@ Write-Log "  Set Win32PrioritySeparation/Games task priority, HAGS, Game Mode, G
 # safety net covers it) and WpnService/WpnUserService (Defender alert
 # toasts may depend on push notifications).
 Write-Log "=== Footprint reduction: non-gaming services ==="
-foreach ($svc in @("TrkWks", "SysMain", "Spooler", "CDPSvc", "CDPUserSvc")) {
+# Second batch (added with the telemetry-free pass) — all confirmed
+# gaming-irrelevant and safe to disable on a single-purpose console box.
+# CDPUserSvc and other per-user (per-session) services carry a random
+# _xxxxx suffix, so match those by prefix rather than exact name.
+$FootprintServices = @(
+    "TrkWks"        # Distributed Link Tracking
+    "SysMain"       # Superfetch — little gain on an SSD gaming box
+    "Spooler"       # Print Spooler — no printer use case
+    "CDPSvc"        # Connected Devices Platform (Phone Link)
+    "MapsBroker"    # Downloaded Maps Manager
+    "lfsvc"         # Geolocation
+    "RetailDemo"    # Retail demo mode
+    "WalletService" # Microsoft Wallet
+    "Fax"           # Fax
+    "PhoneSvc"      # Phone / telephony state
+    "WbioSrvc"      # Windows Biometric (no fingerprint/face on this box)
+    "SEMgrSvc"      # Payments & NFC/SE Manager
+    "SCardSvr"      # Smart Card
+    "ScDeviceEnum"  # Smart Card Device Enumeration
+    "SmsRouter"     # Windows SMS Router
+    "PcaSvc"        # Program Compatibility Assistant (also telemetry-adjacent)
+    "RemoteRegistry"
+)
+foreach ($svc in $FootprintServices) {
     Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
     Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
 }
-Write-Log "  Disabled: TrkWks (link tracking), SysMain (Superfetch — SSD-era gaming boxes gain little from it), Spooler (no printer use case), CDPSvc/CDPUserSvc (Phone Link / Connected Devices — measured ~47MB via CrossDeviceResume alone)."
+# Per-user template services (disable the template so new sessions don't spawn them)
+foreach ($tmpl in @("CDPUserSvc", "MessagingService", "PimIndexMaintenanceSvc", "UserDataSvc", "UnistoreSvc")) {
+    Get-Service -Name "$tmpl*" -ErrorAction SilentlyContinue | ForEach-Object {
+        Set-Service -Name $_.Name -StartupType Disabled -ErrorAction SilentlyContinue
+        Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue
+    }
+}
+Write-Log "  Disabled non-gaming services (link tracking, Superfetch, Spooler, Connected Devices, Maps, Geolocation, RetailDemo, Wallet, Fax, Telephony, Biometric, NFC/SmartCard, SMS, PCA, RemoteRegistry + per-user Messaging/Contacts/UserData template services)."
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 4. SAFETY NET — confirm Windows Defender is untouched
@@ -297,66 +430,84 @@ if (Test-Path $steamExe) {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5a. GAME MODE SHELL — replaces explorer.exe as the Winlogon shell
+# 5a. GAME MODE — boot straight into Big Picture (explorer stays the shell)
 # ═══════════════════════════════════════════════════════════════════════════
-# REVERSAL from this project's original design: explorer.exe used to stay
-# the registered shell, with Steam Big Picture just autostarting via a
-# Startup-folder shortcut on top of it (still what the sibling Win11-Install
-# project's README used to say too). This now does a real shell swap so the
-# machine boots straight into Big Picture, SteamOS-Deck-style, instead of
-# landing on a bare desktop first. See game-mode-shell.ps1's own header for
-# the full mechanism and the Safe Mode recovery command if this ever needs
-# undoing on a machine that's already been imaged.
+# ARCHITECTURE (the "JohnMBooth hybrid"): explorer.exe REMAINS the real
+# Winlogon\Shell — this does NOT swap the shell. Windows starts the desktop
+# (Progman + taskbar + wallpaper) the normal, fully-painted way, and a
+# per-user Startup item (Start-GameMode.ps1) launches Steam Big Picture on
+# top behind a black splash.
 #
-# Researched but not vendored: LifeDreamer24/SteamOS-Shell, jazir555/
-# GamesDows, quangmach/GameLauncherShell — all three are small batch/
-# VBScript hobby projects, none with a working "jump back into Game Mode
-# from the desktop" flow. GamesDows' pre-launch-explorer-hidden technique
-# is what game-mode-shell.ps1 borrows (as a technique, not as code — GPLv3,
-# not copied); the return-to-Game-Mode piece is simpler than any of them
-# attempt: Steam already takes over the screen again on
-# `steam://open/bigpicture`, so a plain desktop shortcut is enough.
-Write-Log "=== Game Mode shell ==="
+# WHY NOT A SHELL SWAP (learned the hard way): the previous design of this
+# project registered powershell+GameModeShell.ps1 as the Winlogon\Shell and
+# hand-launched explorer. An explorer started that way — especially after Big
+# Picture's exclusive-fullscreen released — never took the desktop shell role:
+# it came up as a bare File Explorer window, no wallpaper, no taskbar (a black/
+# dead desktop). Forcing a display modeset didn't help because the problem was
+# never the display; explorer was a child process, not the shell. Keeping
+# explorer as the real shell removes that entire bug class: exiting Big Picture
+# returns to a desktop Windows has been painting all along.
+#
+# This is the same conclusion mature launcher-shell projects reached
+# independently: quangmach/GameLauncherShell dropped explorer shell-replacement
+# in its 2.0 rewrite (explorer artifacts / on-screen-keyboard popups), and
+# caffeinateddragonware/windowshandheldmod keeps a real shell and layers the
+# launcher on top behind a boot animation. Microsoft's own Xbox "full screen
+# experience" on handhelds works the same way conceptually — a game UI over a
+# suppressed-but-live desktop, with a "switch to desktop" path back — which is
+# exactly the Exit-to-Desktop → real-desktop flow this gives you.
+Write-Log "=== Game Mode (Big Picture autostart; explorer stays the shell) ==="
 $WinlogonPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+# Belt-and-suspenders: make sure nothing left the shell as anything but
+# explorer.exe (older images of this project shipped a shell swap here).
+Set-ItemProperty -Path $WinlogonPath -Name "Shell" -Value "explorer.exe" -ErrorAction SilentlyContinue
 if (Test-Path $steamExe) {
     try {
         $GameModeDir = Join-Path $env:ProgramData "GameMode"
         New-Item -ItemType Directory -Path $GameModeDir -Force | Out-Null
-        $SourceShellScript = "C:\Windows\Setup\Scripts\game-mode-shell.ps1"
-        $GameModeShellScript = Join-Path $GameModeDir "GameModeShell.ps1"
-        Copy-Item -Path $SourceShellScript -Destination $GameModeShellScript -Force
-        Set-ItemProperty -Path $WinlogonPath -Name "Shell" -Value "powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$GameModeShellScript`""
-        Write-Log "  Registered $GameModeShellScript as the Winlogon shell."
 
-        # The desktop shortcut can't just launch Steam directly — it also
-        # has to flip the persisted mode file back to "game" (see
-        # game-mode-shell.ps1's header), or a later reboot would still
-        # honor a stale "desktop" state from the last time Big Picture was
-        # exited. A tiny .cmd wrapper keeps that logic out of the .lnk
-        # itself.
+        # The proven launcher (splash → Big Picture → dismiss). Shipped in
+        # $OEM$ alongside this script, copied to ProgramData so it survives
+        # independent of the setup media.
+        $SourceLauncher = "C:\Windows\Setup\Scripts\Start-GameMode.ps1"
+        $LauncherScript = Join-Path $GameModeDir "Start-GameMode.ps1"
+        if (Test-Path $SourceLauncher) {
+            Copy-Item -Path $SourceLauncher -Destination $LauncherScript -Force
+        } else {
+            Write-Log "  Start-GameMode.ps1 not found in Setup\Scripts — cannot set up autostart." "Red"
+            throw "Start-GameMode.ps1 missing"
+        }
+
+        # A tiny .cmd wrapper launches the (hidden) launcher — used by both the
+        # Startup item and the "Game Mode" desktop shortcut for re-entry.
         $EnterGameModeScript = Join-Path $GameModeDir "Enter-GameMode.cmd"
         @"
 @echo off
-> "%ProgramData%\GameMode\mode.txt" echo game
-start "" "$steamExe" -start steam://open/bigpicture
+start "" powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$LauncherScript"
 "@ | Set-Content -Path $EnterGameModeScript -Encoding ASCII
 
-        $PublicDesktop = Join-Path $env:PUBLIC "Desktop"
-        $GameModeShortcut = Join-Path $PublicDesktop "Game Mode.lnk"
+        # Startup-folder shortcut = boots straight into Big Picture every login.
+        $StartupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+        New-Item -ItemType Directory -Path $StartupDir -Force -ErrorAction SilentlyContinue | Out-Null
         $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($GameModeShortcut)
-        $shortcut.TargetPath = $EnterGameModeScript
-        $shortcut.WorkingDirectory = Split-Path $steamExe
-        $shortcut.IconLocation = $steamExe
-        $shortcut.WindowStyle = 7  # minimized - the .cmd window shouldn't be visible
-        $shortcut.Description = "Return to Game Mode (Steam Big Picture)"
-        $shortcut.Save()
-        Write-Log "  Created 'Game Mode' desktop shortcut: $GameModeShortcut -> $EnterGameModeScript"
+        foreach ($lnkTarget in @(
+            @{ Path = Join-Path $StartupDir "Game Mode.lnk";                 Desc = "Launch Steam Big Picture at login" },
+            @{ Path = Join-Path (Join-Path $env:PUBLIC "Desktop") "Game Mode.lnk"; Desc = "Return to Game Mode (Steam Big Picture)" }
+        )) {
+            $shortcut = $shell.CreateShortcut($lnkTarget.Path)
+            $shortcut.TargetPath = $EnterGameModeScript
+            $shortcut.WorkingDirectory = Split-Path $steamExe
+            $shortcut.IconLocation = $steamExe
+            $shortcut.WindowStyle = 7   # minimized — the .cmd window shouldn't flash
+            $shortcut.Description = $lnkTarget.Desc
+            $shortcut.Save()
+        }
+        Write-Log "  Set up Big Picture autostart (Startup shortcut) + 'Game Mode' desktop shortcut for re-entry. explorer.exe remains the shell."
     } catch {
-        Write-Log "  Failed to set up the Game Mode shell (non-fatal — explorer.exe remains the shell, Steam must be launched manually): $_" "Red"
+        Write-Log "  Failed to set up Game Mode autostart (non-fatal — explorer.exe is the shell, launch Steam manually): $_" "Red"
     }
 } else {
-    Write-Log "  Skipping Game Mode shell setup — Steam was not confirmed installed." "Yellow"
+    Write-Log "  Skipping Game Mode autostart — Steam was not confirmed installed." "Yellow"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════

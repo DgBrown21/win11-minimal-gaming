@@ -1,10 +1,12 @@
 # Windows 11 Pro — Minimal Gaming Build
 
 Builds a heavily size-reduced Windows 11 Pro install ISO aimed purely at
-PC gaming: local account only, no Microsoft Account, no Edge, no OneDrive,
-no bundled apps/features beyond what a gaming box needs, Windows Defender
-kept working, Windows Update disabled. Built for bare-metal installs on
-hardware without Secure Boot/TPM enforcement.
+PC gaming: local account only, no Microsoft Account, no Edge (removed
+offline), no OneDrive, no bundled apps/features beyond what a gaming box
+needs, aggressively telemetry-free, a performance power plan by default,
+Windows Defender kept working, Windows Update disabled. Boots straight into
+Steam Big Picture with explorer.exe still the real shell. Built for
+bare-metal installs on hardware without Secure Boot/TPM enforcement.
 
 ## License
 
@@ -35,13 +37,19 @@ different reliability characteristics:
   .NET Framework 3.5 (needed because Windows Update — the normal on-demand
   fetch mechanism for it — is disabled), runs `/ResetBase` component
   cleanup, then recompresses `install.wim` to `install.esd` (LZMS).
+  Microsoft **Edge is also removed here, offline**, the reliable way — its
+  installed folders (`Edge` / `EdgeCore` / `EdgeUpdate`) are deleted straight
+  out of the mounted image (the tiny11builder approach) and EdgeUpdate is
+  blocked from reinstalling it in the registry. WebView2 is kept.
 - **`first-boot-tweaks.ps1`** — runs once at first login on the installed
-  machine, for the few things that aren't safely doable offline: Microsoft
-  Edge removal and OneDrive removal (both are Win32 installs baked in via
-  their own installer, not provisioned Appx packages — offline DISM
-  removal of either from a retail image is unsupported/unreliable), plus
-  disabling Windows Update and confirming Windows Defender still works
-  (both are live service/scheduled-task state, not image content).
+  machine, for the few things that aren't safely doable offline: OneDrive
+  removal (a per-user Win32 install whose official uninstaller is more
+  complete than offline folder deletion), a runtime Edge **guard** (disable
+  EdgeUpdate tasks/services + reassert the reinstall block; Edge itself is
+  already gone from the offline image), disabling Windows Update, a broad
+  **telemetry-off / privacy** pass, footprint-reducing service disables, a
+  **performance power plan**, and confirming Windows Defender still works
+  (all live service/scheduled-task/registry state, not image content).
 
 ## Honest size expectations
 
@@ -67,26 +75,39 @@ language stripping) is possible in a later pass if needed.
   password accounts to console/physical logon only, never network. Set a
   real password later via Settings if you want one; autologon simply stops
   working at that point (expected, not a bug).
-- **Steam, installed and boots straight into Big Picture via a Game Mode
-  shell** — `first-boot-tweaks.ps1` installs Steam (winget, falling back to
-  the official installer), then registers `game-mode-shell.ps1` as the
-  Windows shell (`Winlogon\Shell`, in place of `explorer.exe`) instead of
-  just autostarting Big Picture on top of a normal desktop. The shell
-  script launches `explorer.exe` itself first (so a real desktop still
-  exists underneath) and then Big Picture on top — combined with autologon
-  above, the machine goes power-on straight to Steam Big Picture, SteamOS/
-  Deck-style. Big Picture's own "Exit to Desktop" reveals the desktop
-  that's already running; a **"Game Mode" icon on the desktop** jumps back
-  into Big Picture at any time. See `game-mode-shell.ps1`'s header for the
-  full mechanism and the Safe Mode recovery command if this ever needs
-  reverting on an already-imaged machine.
-- **Telemetry services/tasks and gaming performance tweaks** — data lifted
-  from Winhance (memstechtips/Winhance) and AtlasOS (Atlas-OS/Atlas): the
-  usual telemetry services (`DiagTrack`, `dmwappushservice`, `PcaSvc`, etc.)
-  and CEIP/diagnostic scheduled tasks disabled, plus `Win32PrioritySeparation`,
-  HAGS, Game Mode, and Game DVR/overlay tweaks. Applied by
-  `first-boot-tweaks.ps1`, live, alongside the WU/Edge/OneDrive work it
-  already did.
+- **Steam, boots straight into Big Picture — explorer stays the real shell.**
+  `first-boot-tweaks.ps1` installs Steam (winget, falling back to the official
+  installer), then sets up `Start-GameMode.ps1` as a **per-user Startup item**
+  that launches Big Picture on top of the normal desktop behind a black boot
+  splash. `explorer.exe` remains the registered `Winlogon\Shell`, so Windows
+  starts the desktop (wallpaper + taskbar) the normal, fully-painted way.
+  Combined with autologon, the machine goes power-on straight to Steam Big
+  Picture, SteamOS/Deck-style; Big Picture's "Exit to Desktop" drops to a
+  real, working desktop (no black screen), and a **"Game Mode" desktop icon**
+  jumps back into Big Picture at any time.
+
+  This deliberately does **not** replace the shell. An earlier version of this
+  project made powershell the `Winlogon\Shell` and hand-launched explorer;
+  testing proved that explorer, started as a child process, never takes the
+  desktop shell role after Big Picture's fullscreen released — you got a bare
+  File Explorer window with no wallpaper/taskbar (a black desktop). Keeping
+  explorer as the real shell removes that entire bug class. Mature launcher-
+  shell projects reached the same conclusion independently — quangmach/
+  GameLauncherShell dropped explorer shell-replacement in its 2.0 rewrite, and
+  caffeinateddragonware/windowshandheldmod layers the launcher over a live
+  shell — which is also how Xbox's handheld "full screen experience" behaves.
+- **Telemetry-off / privacy, footprint reduction, performance power plan, and
+  gaming tweaks** — data lifted from Winhance (memstechtips/Winhance), AtlasOS
+  (Atlas-OS/Atlas) and winutil (ChrisTitusTech/winutil): telemetry services
+  (`DiagTrack`, `dmwappushservice`, `PcaSvc`, `WerSvc`, …) and CEIP/diagnostic
+  scheduled tasks disabled; a broad privacy registry pass (`AllowTelemetry=0`,
+  EventTranscript + Diagtrack autologger off, advertising ID, activity feed,
+  location, Windows Error Reporting, input/speech personalization, Copilot/
+  Recall); extra non-gaming services disabled to cut process count (Superfetch,
+  Spooler, Connected Devices, Maps, Geolocation, Biometric, NFC/SmartCard, …);
+  an **Ultimate/High Performance power plan** with never-sleep + USB selective
+  suspend off; plus `Win32PrioritySeparation`, HAGS, Game Mode, and Game DVR/
+  overlay tweaks. Applied by `first-boot-tweaks.ps1`, live.
 
 ## What this deliberately does NOT do
 
@@ -153,8 +174,8 @@ language stripping) is possible in a later pass if needed.
 | `build-windows.ps1` | Fetches the official Microsoft ISO, extracts it, runs `slim-image.ps1`, injects the answer file + first-boot script, rebuilds with `oscdimg`. |
 | `slim-image.ps1` | The core size-reduction work — offline DISM servicing against `install.wim`. Can be re-run standalone against an already-extracted `build\extracted` folder while iterating, without re-downloading the source ISO. |
 | `autounattend.xml` | The unattended answer file. |
-| `first-boot-tweaks.ps1` | Edge/OneDrive removal, Windows Update disable, Defender safety net, telemetry/gaming-perf tweaks, Game Mode shell setup — runs once at first login. |
-| `game-mode-shell.ps1` | Registered as the Windows shell in place of `explorer.exe` — boots straight into Steam Big Picture, SteamOS/Deck-style. Staged onto the ISO by `build-windows.ps1`, installed by `first-boot-tweaks.ps1`. |
+| `first-boot-tweaks.ps1` | OneDrive removal + Edge runtime guard, Windows Update disable, telemetry-off/privacy pass, footprint service disables, performance power plan, Defender safety net, Steam install + Big Picture autostart — runs once at first login. |
+| `Start-GameMode.ps1` | Per-user Startup launcher: shows a black splash and launches Steam Big Picture on top of the normal desktop (explorer.exe stays the shell). Staged onto the ISO by `build-windows.ps1`, wired up by `first-boot-tweaks.ps1`. |
 | `Win11-Minimal.iso` | **Not in this repo** — build artifact, see `.gitignore`. Build it yourself; redistributing Microsoft's install media isn't something this repo does. |
 
 ## Requirements to build
@@ -174,11 +195,12 @@ a "path already mounted" error before that, run manually first:
 dism /Cleanup-Mountpoints
 ```
 
-If the **Game Mode shell** ever fails to reach a usable desktop on an
-already-imaged machine (a bad edit to `game-mode-shell.ps1`, Steam moved,
-etc.), boot to Safe Mode / Safe Mode with Command Prompt and run:
+Because `explorer.exe` stays the real shell, there's no black-desktop failure
+mode to recover from here — if Big Picture ever fails to launch, you're simply
+left on the normal desktop and can start Steam manually. To stop the
+boot-into-Big-Picture behaviour entirely, delete the **"Game Mode"** shortcut
+from the Startup folder:
 ```
-reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v Shell /t REG_SZ /d explorer.exe /f
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Game Mode.lnk
 ```
-then reboot normally — this reverts to a plain `explorer.exe` desktop with
-no Big Picture autostart; Steam can still be launched manually from there.
+The desktop **"Game Mode"** icon re-enters Big Picture on demand at any time.
