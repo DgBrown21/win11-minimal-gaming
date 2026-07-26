@@ -1,0 +1,115 @@
+<#
+.SYNOPSIS
+    Login launcher that boots this machine straight into Steam Big Picture.
+
+.DESCRIPTION
+    ARCHITECTURE (the "JohnMBooth hybrid"): the machine does NOT replace the
+    Windows shell. explorer.exe stays the real Winlogon\Shell, so Windows
+    itself starts the desktop (Progman + taskbar + wallpaper) the normal,
+    fully-painted way. This script is NOT the shell — it's a per-user Startup
+    item that simply launches Big Picture on top of the real desktop.
+
+    WHY THIS AND NOT A SHELL SWAP: the earlier design of this project made
+    powershell the Winlogon\Shell and hand-launched explorer.exe. Testing
+    (multiple reboots) proved an explorer.exe started that way — especially
+    when restarted after Big Picture's exclusive-fullscreen released — does
+    NOT take over the desktop shell role: it came up as a bare File Explorer
+    *window* with no wallpaper and no taskbar, and a forced display modeset
+    (CDS_RESET) did not fix it, because the problem was never the display, it
+    was that explorer was a child process rather than the shell. Making
+    explorer the real shell removes the entire black/dead-desktop bug class:
+    exiting Big Picture just returns to a desktop Windows has been painting
+    all along. This matches what mature game-launcher-shell projects settled
+    on independently — e.g. quangmach/GameLauncherShell explicitly abandoned
+    explorer shell-replacement in its 2.0 rewrite over the same explorer
+    artifact/on-screen-keyboard issues, and caffeinateddragonware/
+    windowshandheldmod likewise keeps a real shell and layers the launcher on
+    top behind a boot animation.
+
+    THE SPLASH: because this runs from the Startup folder, the real desktop is
+    briefly visible before Big Picture covers it. A topmost black splash is
+    shown the instant this script starts and closed only once Big Picture has
+    had time to paint, so the transition still reads console-like. The splash
+    has a hard timeout so a missing/broken Steam just drops to the (working)
+    real desktop instead of stranding on black. (A future enhancement, seen in
+    both projects above, is to play a short boot VIDEO here instead of a flat
+    splash — same mechanism, nicer console feel.)
+
+    No watchdog loop lives here: explorer being the real shell means Windows
+    keeps the desktop alive, and exiting Big Picture needs no repaint trickery.
+    This script's job ends once the splash is dismissed.
+
+    RE-ENTRY: the "Game Mode" desktop shortcut (Enter-GameMode.cmd) runs this
+    same script, so dropping to the desktop and clicking it returns to Big
+    Picture with the same splash.
+#>
+
+$LogFile = Join-Path $env:ProgramData "GameModeShell.log"
+function Write-Log {
+    param([string]$Message)
+    try {
+        Add-Content -Path $LogFile -Value ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message) -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+Write-Log "==== Start-GameMode launcher starting (explorer is the real shell) ===="
+
+# ── Boot splash — masks the brief real-desktop flash before Big Picture paints ──
+$splashForm = $null
+try {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $splashForm = New-Object System.Windows.Forms.Form
+    $splashForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+    $splashForm.WindowState = [System.Windows.Forms.FormWindowState]::Maximized
+    $splashForm.BackColor = [System.Drawing.Color]::Black
+    $splashForm.TopMost = $true
+    $splashForm.ShowInTaskbar = $false
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = "Starting Game Mode..."
+    $label.ForeColor = [System.Drawing.Color]::White
+    $label.Font = New-Object System.Drawing.Font("Segoe UI", 24)
+    $label.AutoSize = $true
+    $splashForm.Controls.Add($label)
+    $splashForm.Add_Shown({
+        $label.Left = [int](($splashForm.ClientSize.Width - $label.Width) / 2)
+        $label.Top = [int](($splashForm.ClientSize.Height - $label.Height) / 2)
+    })
+    $splashForm.Show()
+    $splashForm.Refresh()
+    Write-Log "Boot splash shown"
+} catch {
+    Write-Log "Could not show boot splash (non-fatal, desktop may be briefly visible): $_"
+    $splashForm = $null
+}
+
+# ── Launch Steam straight into Big Picture ──
+$steamExe = "${env:ProgramFiles(x86)}\Steam\steam.exe"
+try {
+    if (Test-Path $steamExe) {
+        Start-Process -FilePath $steamExe -ArgumentList "-start steam://open/bigpicture"
+        Write-Log "Launched Steam Big Picture"
+    } else {
+        Write-Log "Steam not found at $steamExe - dropping to desktop"
+    }
+} catch {
+    Write-Log "Failed to launch Steam Big Picture: $_"
+}
+
+# ── Hold the splash until Big Picture's UI is up (capped) then reveal ──
+if ($splashForm) {
+    try {
+        $waitedMs = 0
+        while ($waitedMs -lt 25000 -and -not (Get-Process -Name steamwebhelper -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Milliseconds 500
+            [System.Windows.Forms.Application]::DoEvents()
+            $waitedMs += 500
+        }
+        Start-Sleep -Seconds 2   # let Big Picture actually paint before revealing it
+        $splashForm.Close()
+        Write-Log "Boot splash dismissed after ~$([math]::Round($waitedMs/1000))s"
+    } catch {
+        Write-Log "Error dismissing splash (non-fatal): $_"
+        try { $splashForm.Close() } catch {}
+    }
+}

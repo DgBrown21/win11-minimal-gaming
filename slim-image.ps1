@@ -10,13 +10,25 @@
     in this script ever touches the machine it runs on, only the extracted
     install media in $ExtractDir\sources\install.wim.
 
-    What this does NOT do: remove Microsoft Edge or OneDrive (both are
-    Win32 installs baked in via their own installer mechanism, not
-    provisioned Appx packages — offline DISM package-removal of either from
-    a retail image is unsupported/unreliable) and does not touch Windows
-    Update/Defender service state (that's live service/scheduled-task
-    state, not image content). Both of those are handled instead by
-    first-boot-tweaks.ps1 at first login on the installed machine.
+    Microsoft Edge IS removed here, offline, comprehensively: Program Files
+    folders (Edge / EdgeCore / EdgeUpdate), SystemApps (Microsoft.MicrosoftEdge*),
+    any Edge-related provisioned Appx packages, SOFTWARE hive entries (uninstall
+    entries, Image File Execution Options, Active Setup, protocol associations,
+    MicrosoftEdge key), and SYSTEM hive services (edgeupdate/edgeupdatem) — all
+    directly out of the mounted image, plus EdgeUpdate reinstall blocked in the
+    offline registry (STEP 6c). This replaces the old plan of running Edge's
+    own `setup.exe --uninstall` at first boot — that DISM *package*-removal /
+    runtime-uninstaller path is what's unsupported and unreliable (Microsoft
+    blocks --force-uninstall outside the EEA and it leaves EdgeCore/EdgeUpdate
+    behind), which is why Edge kept surviving. WebView2
+    (Program Files\Microsoft\EdgeWebView) is deliberately KEPT — unrelated apps
+    depend on it.
+
+    What this does NOT do: remove OneDrive (a per-user Win32 install whose
+    official uninstaller is more complete than offline folder deletion) and
+    does not touch Windows Update/Defender service state (that's live
+    service/scheduled-task state, not image content). Those are handled
+    instead by first-boot-tweaks.ps1 at first login on the installed machine.
 
     Order matters and is NOT safe to reshuffle:
       1. Resolve the Windows 11 Pro index by name (never by hardcoded
@@ -215,6 +227,7 @@ try {
         "MicrosoftCorporationII.QuickAssist"
         "MicrosoftWindows.CrossDevice"
         "Microsoft.BingSearch"
+        "Microsoft.MicrosoftEdgeDevToolsClient"
     )
     $provBefore = @(Get-ProvisionedAppxPackage -Path $MountDir).Count
     foreach ($app in $AppsToRemove) {
@@ -399,6 +412,135 @@ try {
         }
         if (-not $unloaded) {
             throw "Could not unload $hiveKey after servicing it — a handle is still open. Aborting before commit rather than risk an inconsistent image."
+        }
+    }
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # STEP 6c — Microsoft Edge — thorough offline removal
+    # ═══════════════════════════════════════════════════════════════════════
+    # Edge is a hybrid: a Win32 install (Program Files + services + scheduled
+    # tasks) plus a provisioned Appx (MicrosoftEdgeDevToolsClient) and legacy
+    # SystemApps folders. The old approach — relying on the runtime
+    # `setup.exe --uninstall --force-uninstall` at first boot — was unreliable
+    # because Microsoft blocks --force-uninstall outside the EEA and it leaves
+    # EdgeCore/EdgeUpdate behind (EdgeCore is a fully working Edge). This is
+    # why Edge kept surviving on earlier builds.
+    #
+    # This STEP handles every facet offline, before the image ever boots:
+    #   A) Delete Program Files folders (Edge, EdgeCore, EdgeUpdate)
+    #   B) Delete SystemApps\Microsoft.MicrosoftEdge* (legacy Edge UWP)
+    #   C) Deprovision any Edge-related Appx packages
+    #   D) Scrub the SOFTWARE hive (uninstall entries, active-setup, assocs,
+    #      Image File Execution Options, MicrosoftEdge key)
+    #   E) Scrub the SYSTEM hive (edgeupdate/edgeupdatem services)
+    #   F) Block EdgeUpdate reinstall (DoNotUpdateToEdgeWithChromium etc.)
+    #
+    # WebView2 (Program Files (x86)\Microsoft\EdgeWebView) is deliberately
+    # KEPT — unrelated apps depend on it.
+    Write-Log "=== Removing Microsoft Edge (offline — folders, Appx, registry, services) ==="
+    $adminGroup = (New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")).Translate([System.Security.Principal.NTAccount]).Value
+
+    # ── A) Delete Program Files folders ──
+    Write-Log "  Phase A — deleting Program Files folders..."
+    foreach ($rel in @(
+        "Program Files (x86)\Microsoft\Edge"
+        "Program Files (x86)\Microsoft\EdgeCore"
+        "Program Files (x86)\Microsoft\EdgeUpdate"
+    )) {
+        $full = Join-Path $MountDir $rel
+        if (Test-Path $full) {
+            & takeown /f "$full" /r /d y | Out-Null
+            & icacls "$full" /grant "$($adminGroup):(F)" /t /c | Out-Null
+            Remove-Item -Path $full -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Log "  Deleted: $rel"
+        } else {
+            Write-Log "  Not present (already gone): $rel" "Yellow"
+        }
+    }
+
+    # ── B) Delete legacy SystemApps folders (from Edge-Appx.bat approach) ──
+    Write-Log "  Phase B — removing legacy Edge SystemApps..."
+    $sysAppsBase = Join-Path $MountDir "Windows\SystemApps"
+    if (Test-Path $sysAppsBase) {
+        Get-ChildItem -Path $sysAppsBase -Directory -Filter "Microsoft.MicrosoftEdge*" -ErrorAction SilentlyContinue | ForEach-Object {
+            & takeown /f $_.FullName /r /d y 2>$null | Out-Null
+            & icacls $_.FullName /grant "$($adminGroup):(F)" /t /c 2>$null | Out-Null
+            Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Log "  Deleted: $($_.Name)"
+        }
+    }
+
+    # ── C) Deprovision any Edge-related Appx packages ──
+    Write-Log "  Phase C — deprovisioning Edge Appx packages..."
+    Get-ProvisionedAppxPackage -Path $MountDir -ErrorAction SilentlyContinue |
+        Where-Object { $_.PackageName -like '*microsoftedge*' -or $_.PackageName -like '*Edge*' } |
+        ForEach-Object {
+            try {
+                Remove-ProvisionedAppxPackage -Path $MountDir -PackageName $_.PackageName -ErrorAction Stop | Out-Null
+                Write-Log "  Deprovisioned: $($_.PackageName)"
+            } catch {
+                Write-Log "  Could not deprovision $($_.PackageName) (non-fatal): $_" "Yellow"
+            }
+        }
+
+    # ── D+E+F) Registry clean-up in SOFTWARE + SYSTEM hives ──
+    Write-Log "  Phase D+E+F — registry cleanup (SOFTWARE + SYSTEM + reinstall block)..."
+    $edgeHiveKey = "HKLM\SLIM_OFFLINE_EDGE"
+    & reg load $edgeHiveKey $softwareHive | Out-Null
+    $systemHive = Join-Path $MountDir "Windows\System32\config\SYSTEM"
+    $systemHiveKey = "HKLM\SLIM_OFFLINE_SYSTEM"
+    & reg load $systemHiveKey $systemHive | Out-Null
+    try {
+        # ── D) SOFTWARE hive ──
+        & reg delete "$edgeHiveKey\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft Edge" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft Edge Update" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\WOW6432Node\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\WOW6432Node\Microsoft\EdgeUpdate\ClientState\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\msedge.exe" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\ie_to_edge_stub.exe" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\MicrosoftEdgeUpdate.exe" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\msedge.exe" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\ie_to_edge_stub.exe" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\MicrosoftEdgeUpdate.exe" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\Microsoft\Active Setup\Installed Components\{9459C573-B17A-45AE-9F64-1857B5D58CEE}" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\Microsoft\MicrosoftEdge" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\Classes\microsoft-edge" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\Classes\MSEdgeHTM" /f 2>$null | Out-Null
+        & reg delete "$edgeHiveKey\Classes\MSEdgeHTML" /f 2>$null | Out-Null
+        & reg add "$edgeHiveKey\WOW6432Node\Microsoft\EdgeUpdateDev" /v AllowUninstall /t REG_SZ /d "1" /f 2>$null | Out-Null
+
+        # ── E) SYSTEM hive — disable EdgeUpdate services ──
+        foreach ($ctrlSet in @("ControlSet001", "ControlSet002", "CurrentControlSet")) {
+            foreach ($svc in @("edgeupdate", "edgeupdatem")) {
+                & reg delete "$systemHiveKey\$ctrlSet\Services\$svc" /f 2>$null | Out-Null
+            }
+        }
+
+        # ── F) Block EdgeUpdate reinstall ──
+        foreach ($euRoot in @("$edgeHiveKey\Microsoft\EdgeUpdate", "$edgeHiveKey\WOW6432Node\Microsoft\EdgeUpdate")) {
+            & reg add $euRoot /v DoNotUpdateToEdgeWithChromium /t REG_DWORD /d 1 /f | Out-Null
+            & reg add $euRoot /v InstallDefault /t REG_DWORD /d 0 /f | Out-Null
+            & reg add $euRoot /v "Install{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}" /t REG_DWORD /d 0 /f | Out-Null
+        }
+        Write-Log "  Edge fully removed from SOFTWARE + SYSTEM hives; reinstall blocked."
+    } finally {
+        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+        $euUnloaded = $false
+        for ($i = 0; $i -lt 5 -and -not $euUnloaded; $i++) {
+            & reg unload $edgeHiveKey 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $euUnloaded = $true } else { Start-Sleep -Seconds 2 }
+        }
+        if (-not $euUnloaded) {
+            throw "Could not unload $edgeHiveKey after the Edge registry step — a handle is still open."
+        }
+        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+        $sysUnloaded = $false
+        for ($i = 0; $i -lt 5 -and -not $sysUnloaded; $i++) {
+            & reg unload $systemHiveKey 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $sysUnloaded = $true } else { Start-Sleep -Seconds 2 }
+        }
+        if (-not $sysUnloaded) {
+            throw "Could not unload $systemHiveKey after the Edge registry step — a handle is still open."
         }
     }
 
