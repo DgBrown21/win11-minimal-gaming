@@ -155,14 +155,19 @@ try {
     #   non-bootable-to-desktop image.
     #
     #   REVERSED 2026-07-24: Calculator, Notepad, Paint, Photos, Camera,
-    #   Snip & Sketch, Store, StorePurchaseApp, DesktopAppInstaller (winget),
-    #   Outlook for Windows, Quick Assist, Cross Device, Bing Search are now
-    #   REMOVED below (~320MB) — none are gaming-relevant. Removing
-    #   DesktopAppInstaller/WindowsStore is safe here specifically because
-    #   first-boot-tweaks.ps1's Steam install already falls back to a direct
-    #   SteamSetup.exe download when `Get-Command winget` finds nothing —
-    #   confirmed no other step in this project depends on winget/Store
-    #   being present on the installed machine.
+    #   Snip & Sketch, Store, StorePurchaseApp, Outlook for Windows, Quick
+    #   Assist, Cross Device, Bing Search are now REMOVED below (~320MB) —
+    #   none are gaming-relevant.
+    #
+    #   KEPT 2026-07-26 — Microsoft.DesktopAppInstaller (winget): earlier this
+    #   was removed too, because the only first-boot app (Steam) has a direct
+    #   installer fallback. That's no longer true — first-boot-tweaks.ps1 now
+    #   installs several apps that only distribute via winget's community
+    #   source (Chrome, Helium, Files, Claude Code, opencode). winget is
+    #   therefore REQUIRED on the installed machine and must survive here. Its
+    #   runtime deps (Microsoft.VCLibs, Microsoft.UI.Xaml) are already kept.
+    #   Microsoft.WindowsStore stays removed — every one of those apps is on
+    #   winget's main community source, none need the Store/msstore handshake.
     Write-Log "=== Removing provisioned Appx packages ==="
     $AppsToRemove = @(
         "Microsoft.549981C3F5F10"              # Cortana
@@ -222,7 +227,8 @@ try {
         "Microsoft.ScreenSketch"
         "Microsoft.WindowsStore"
         "Microsoft.StorePurchaseApp"
-        "Microsoft.DesktopAppInstaller"
+        # Microsoft.DesktopAppInstaller (winget) intentionally NOT removed —
+        # first-boot app installs depend on it. See the KEPT note above.
         "Microsoft.OutlookForWindows"
         "MicrosoftCorporationII.QuickAssist"
         "MicrosoftWindows.CrossDevice"
@@ -438,6 +444,19 @@ try {
     # WebView2 (Program Files (x86)\Microsoft\EdgeWebView) is deliberately
     # KEPT — unrelated apps depend on it.
     Write-Log "=== Removing Microsoft Edge (offline — folders, Appx, registry, services) ==="
+    # CRITICAL (learned by a failed 1-2h run): this whole step shells out to
+    # native commands — takeown, icacls, and many `reg delete`/`reg add`. In
+    # PowerShell 5.1 with the script-global $ErrorActionPreference = "Stop",
+    # ANY stderr line from a native command becomes a TERMINATING
+    # NativeCommandError — and `2>$null` does NOT reliably suppress it. A
+    # `reg delete` of a key that legitimately doesn't exist ("unable to find
+    # the specified registry key or value") therefore aborted the entire
+    # servicing run and discarded the mount. These deletes are all best-effort
+    # (remove-if-present), so run the step under EAP=Continue — the same fix
+    # build-windows.ps1 already applies around its oscdimg call. Restored at the
+    # end of the step (STEP 6c) before STEP 7's DISM work, which still wants Stop.
+    $prevEAPEdge = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $adminGroup = (New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")).Translate([System.Security.Principal.NTAccount]).Value
 
     # ── A) Delete Program Files folders ──
@@ -543,6 +562,9 @@ try {
             throw "Could not unload $systemHiveKey after the Edge registry step — a handle is still open."
         }
     }
+    # Restore the script-global Stop behavior before STEP 7's DISM cmdlets,
+    # which rely on it (see the EAP=Continue note at the top of STEP 6c).
+    $ErrorActionPreference = $prevEAPEdge
 
     # ═══════════════════════════════════════════════════════════════════════
     # STEP 7 — component-store cleanup (the step that makes removals count)

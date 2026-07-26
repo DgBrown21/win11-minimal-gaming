@@ -33,11 +33,12 @@
          once the desktop is reached. Big Picture's own "Exit to Desktop"
          always gets you to a normal desktop — no custom shell replacement,
          explorer.exe stays the shell throughout.
-      6. Files (files-community/Files) — attempted via winget's msstore
-         source as an optional Explorer alternative. Best-effort only: no
-         direct MSIX download exists for it, and msstore acquisition may
-         require a signed-in Microsoft account this build deliberately
-         doesn't have. Failure here is silent/non-fatal.
+      6. Extra apps via winget (all best-effort/non-fatal): Google Chrome,
+         Helium (private browser, set as default via SetUserFTA), Files
+         (file manager, set as default via a folder-open override), Git for
+         Windows (required by Claude Code), Claude Code, and opencode. winget
+         is kept in the image (slim-image.ps1 no longer removes
+         DesktopAppInstaller) specifically so these can install.
       7. Windows autologon — enabled for the account this script is running
          as. Paired with the blank password autounattend.xml creates it
          with (see that file's header for the safety reasoning); the net
@@ -511,25 +512,121 @@ start "" powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy 
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5b. FILES — open-source file manager (files-community/Files), sideloaded
-#     via winget's msstore source since it has no direct MSIX download.
+# 5b. EXTRA APPS — browsers, file manager, AI CLIs (all via winget)
 # ═══════════════════════════════════════════════════════════════════════════
-# UNVERIFIED: acquiring a Store app through winget's msstore source normally
-# requires a licensing handshake that historically wants a signed-in
-# Microsoft account — this machine intentionally has none (local-only
-# blank-password autologon). This may simply fail here. Treated as fully
-# non-fatal/best-effort: Explorer remains available regardless, so a failure
-# just means no Files shortcut gets created, nothing else breaks.
-Write-Log "=== Files (file manager) ==="
+# All installed from winget's main community source. winget is deliberately
+# KEPT in the image for this (slim-image.ps1 no longer removes
+# Microsoft.DesktopAppInstaller). Everything here is best-effort/non-fatal:
+# a failed app install just logs and continues — it never aborts first boot.
+#   - Google Chrome            Google.Chrome
+#   - Helium (private browser) ImputNet.Helium   (set as default — see 5c)
+#   - Files (file manager)     Files-Community.Files (set as default — see 5c)
+#   - Git for Windows          Git.Git           (REQUIRED by Claude Code — it
+#                                                  shells out to Git Bash)
+#   - Claude Code (AI CLI)     Anthropic.ClaudeCode
+#   - opencode (AI CLI)        SST.opencode
+Write-Log "=== Extra apps (winget) ==="
+$winget = Get-Command winget -ErrorAction SilentlyContinue
+if (-not $winget) {
+    Write-Log "  winget not found on this image — cannot install the extra apps. (slim-image.ps1 is supposed to KEEP Microsoft.DesktopAppInstaller; check that.)" "Red"
+} else {
+    function Install-WingetApp {
+        param([string]$Id, [string]$Name)
+        Write-Log "  Installing $Name ($Id)..."
+        try {
+            winget install --id $Id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "    $Name installed."
+            } else {
+                Write-Log "    $Name install returned exit code $LASTEXITCODE (non-fatal, continuing)." "Yellow"
+            }
+        } catch {
+            Write-Log "    $Name install failed (non-fatal, continuing): $_" "Yellow"
+        }
+    }
+    Install-WingetApp -Id "Google.Chrome"        -Name "Google Chrome"
+    Install-WingetApp -Id "ImputNet.Helium"      -Name "Helium browser"
+    Install-WingetApp -Id "Files-Community.Files" -Name "Files (file manager)"
+    Install-WingetApp -Id "Git.Git"              -Name "Git for Windows (Claude Code prerequisite)"
+    Install-WingetApp -Id "Anthropic.ClaudeCode" -Name "Claude Code"
+    Install-WingetApp -Id "SST.opencode"         -Name "opencode"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5c. DEFAULT APPS — Helium as default browser, Files as default file manager
+# ═══════════════════════════════════════════════════════════════════════════
+# Both are best-effort / non-fatal. Runs as the autologon user (Gamer), which
+# is correct — these are per-user (HKCU / UserChoice) settings.
+Write-Log "=== Default apps ==="
+
+# ── Default browser: Helium via SetUserFTA ──────────────────────────────────
+# Windows 11 protects the http/https/.html UserChoice with a per-user hash, so
+# a plain registry write is rejected/reverted. SetUserFTA (Christoph Kolbicz's
+# free tool, https://kolbi.cz) computes that hash and is the standard way to
+# set defaults unattended. Downloaded fresh at first boot over HTTPS from the
+# author's site (explicit project choice). Non-fatal if the download or the
+# tool fails — the browser just isn't forced-default and Windows will prompt.
 try {
-    winget install --id 9NGHP3DX8HDX -s msstore -e --silent --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -eq 0) {
-        Write-Log "  Files installed via msstore."
+    # Resolve the ProgId Helium actually registered (don't hardcode/guess it).
+    $heliumProgId = $null
+    foreach ($root in @("HKLM:\SOFTWARE\Clients\StartMenuInternet", "HKCU:\SOFTWARE\Clients\StartMenuInternet")) {
+        Get-ChildItem $root -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSChildName -like "*Helium*" } |
+            ForEach-Object {
+                $assoc = (Get-ItemProperty -Path (Join-Path $_.PSPath "Capabilities\URLAssociations") -Name "https" -ErrorAction SilentlyContinue)."https"
+                if ($assoc) { $heliumProgId = $assoc }
+            }
+    }
+    if (-not $heliumProgId) {
+        Write-Log "  Helium ProgId not found in the registry (Helium may not have installed) — skipping default-browser step." "Yellow"
     } else {
-        Write-Log "  Files install via msstore returned exit code $LASTEXITCODE (likely needs a signed-in Microsoft account) — skipping, Explorer remains the file manager." "Yellow"
+        Write-Log "  Helium ProgId = $heliumProgId"
+        $sufZip = Join-Path $env:TEMP "SetUserFTA.zip"
+        $sufDir = Join-Path $env:TEMP "SetUserFTA"
+        Invoke-WebRequest -Uri "https://kolbi.cz/SetUserFTA.zip" -OutFile $sufZip -UseBasicParsing
+        Expand-Archive -Path $sufZip -DestinationPath $sufDir -Force
+        $sufExe = Get-ChildItem -Path $sufDir -Filter "SetUserFTA.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($sufExe) {
+            foreach ($assocKey in @("https", "http", ".html", ".htm")) {
+                & $sufExe.FullName $assocKey $heliumProgId | Out-Null
+            }
+            Write-Log "  Set Helium as default for https/http/.html/.htm via SetUserFTA."
+        } else {
+            Write-Log "  SetUserFTA.exe not found after extraction — default-browser step skipped." "Yellow"
+        }
     }
 } catch {
-    Write-Log "  Files install via msstore failed (non-fatal, Explorer remains the file manager): $_" "Yellow"
+    Write-Log "  Default-browser step failed (non-fatal): $_" "Yellow"
+}
+
+# ── Default file manager: Files via folder-open command override ─────────────
+# There is no official "default file manager" setting in Windows. Overriding
+# the per-user Directory/Drive "open" command points folder double-clicks at
+# Files instead of Explorer. Reversible (delete the HKCU\...\Classes keys);
+# Explorer still exists underneath. If this ever misbehaves, Files' own
+# Settings > "Set as default file manager" toggle is the guaranteed fallback.
+try {
+    $filesAlias = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WindowsApps" -Filter "files.exe" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $filesAlias) {
+        $filesAlias = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WindowsApps" -Filter "*files*.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if (-not $filesAlias) {
+        Write-Log "  Files launcher alias not found in WindowsApps — skipping default-file-manager step." "Yellow"
+    } else {
+        $cmd = "`"$($filesAlias.FullName)`" `"%1`""
+        foreach ($cls in @("Directory", "Drive")) {
+            $cmdKey = "HKCU:\Software\Classes\$cls\shell\open\command"
+            New-Item -Path $cmdKey -Force -ErrorAction SilentlyContinue | Out-Null
+            Set-ItemProperty -Path $cmdKey -Name "(default)" -Value $cmd -ErrorAction SilentlyContinue
+            # A stale DDE hook on the default verb would otherwise override the command.
+            Remove-ItemProperty -Path "HKCU:\Software\Classes\$cls\shell\open" -Name "DelegateExecute" -ErrorAction SilentlyContinue
+        }
+        Write-Log "  Set Files as the default folder handler (Directory + Drive open command)."
+    }
+} catch {
+    Write-Log "  Default-file-manager step failed (non-fatal, Explorer remains): $_" "Yellow"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
