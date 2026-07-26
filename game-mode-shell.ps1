@@ -38,17 +38,25 @@
     behind the splash), launch Steam straight into Big Picture, wait for it
     to come up, then close the splash. From then on this script watches:
       - explorer.exe crashing outright — relaunched immediately.
-      - Steam's process exiting (Big Picture's "Exit to Desktop" fully
-        closes the Steam client, confirmed by testing — it doesn't linger
-        in the tray) — explorer.exe is deliberately KILLED AND RESTARTED at
-        that moment, not just left alone. FOUND BY TESTING (2026-07-25):
-        the pre-launched explorer.exe instance often doesn't repaint its
-        taskbar/desktop cleanly after Big Picture's exclusive-fullscreen
-        mode releases the display — the process is still alive, but the
-        user is left looking at nothing. Forcing a fresh explorer.exe
-        instance at that exact moment guarantees a clean, visible desktop
-        every time. This is also the moment the mode file flips to
-        "desktop" (see above).
+      - The user returning to the desktop from Big Picture — explorer.exe is
+        deliberately KILLED AND RESTARTED at that moment, not just left
+        alone. FOUND BY TESTING (2026-07-25): the pre-launched explorer.exe
+        instance often doesn't repaint its taskbar/desktop cleanly after Big
+        Picture's exclusive-fullscreen mode releases the display — the
+        process is still alive, but the user is left looking at nothing.
+        Forcing a fresh explorer.exe instance at that exact moment
+        guarantees a clean, visible desktop every time. This is also the
+        moment the mode file flips to "desktop" (see above).
+
+        CORRECTED (2026-07-26): the original build keyed this off steam.exe
+        exiting, on the assumption (wrongly "confirmed by testing" on
+        2026-07-25) that Big Picture's "Exit to Desktop" fully quits Steam.
+        It does NOT on current Steam — the client stays running in the tray,
+        so that trigger never fired and the user was stranded on a dead
+        desktop with Big Picture gone. The return-to-desktop signal is now
+        the foreground window becoming the desktop (explorer) after
+        Steam/Big Picture held it; steam.exe fully exiting is kept only as a
+        fallback. See the watchdog loop and Get-ForegroundProcessName below.
 
     RECOVERY: a broken edit here just degrades to a plain desktop with no
     Big Picture autostart (explorer.exe still launches first, independent
@@ -86,6 +94,49 @@ function Set-GameModeState {
         New-Item -ItemType Directory -Path (Split-Path -Parent $ModeFile) -Force -ErrorAction SilentlyContinue | Out-Null
         Set-Content -Path $ModeFile -Value $Mode -ErrorAction SilentlyContinue
     } catch {}
+}
+
+# ── Foreground-window detection ───────────────────────────────────────────
+# Used by the watchdog to notice the user has returned to the DESKTOP from Big
+# Picture without relying on steam.exe fully exiting. FOUND BY TESTING
+# (2026-07-26): current Steam does NOT terminate steam.exe on Big Picture's
+# "Exit to Desktop" — it drops back to the desktop with the client still
+# running in the tray, so the old "steam process exited" trigger never fired
+# and the desktop was left un-repainted after exclusive-fullscreen released.
+# Keying on the foreground window instead is resilient to that: when the
+# desktop (explorer's Progman) becomes foreground after Steam/Big Picture had
+# it, we force the clean explorer restart. Launching a GAME makes the game the
+# foreground window (not explorer), so this deliberately does NOT fire then.
+# If the P/Invoke can't compile the whole thing degrades to the original
+# steam-exit-only behavior — never let this abort the shell.
+$ForegroundAvailable = $false
+try {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class GameModeFg {
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    public static uint ForegroundPid() {
+        IntPtr h = GetForegroundWindow();
+        if (h == IntPtr.Zero) return 0;
+        uint pid; GetWindowThreadProcessId(h, out pid); return pid;
+    }
+}
+'@ -ErrorAction Stop
+    $ForegroundAvailable = $true
+} catch {}
+
+function Get-ForegroundProcessName {
+    # Lowercased base process name of the current foreground window, or $null.
+    if (-not $ForegroundAvailable) { return $null }
+    try {
+        $fgPid = [GameModeFg]::ForegroundPid()
+        if ($fgPid -eq 0) { return $null }
+        $p = Get-Process -Id ([int]$fgPid) -ErrorAction SilentlyContinue
+        if ($p) { return $p.ProcessName.ToLowerInvariant() }
+    } catch {}
+    return $null
 }
 
 $mode = Get-GameModeState
@@ -173,6 +224,18 @@ if ($mode -eq "game") {
 # Stay alive for the whole session — Winlogon logs the session off the
 # instant this process exits, so the loop body must never let an exception
 # escape, and the loop itself must never end.
+#
+# "Returned to desktop" is detected two ways (either one triggers the clean
+# explorer restart + persist Desktop Mode):
+#   1. Foreground window becomes the desktop (explorer) AFTER Steam/Big
+#      Picture had held the foreground — the reliable signal for Big Picture's
+#      "Exit to Desktop" now that steam.exe no longer quits (see header note).
+#      $steamHadFocus re-arms only when Steam/Big Picture is foreground again,
+#      so this fires once per return, not repeatedly while sitting on the
+#      desktop, and NOT while a game is fullscreen (the game is foreground).
+#   2. steam.exe fully exiting — the original trigger, kept as a fallback for
+#      the case where the user does fully quit Steam.
+$steamHadFocus = $false
 while ($true) {
     try {
         Start-Sleep -Seconds 5
@@ -182,18 +245,28 @@ while ($true) {
             Start-DesktopExplorer
         }
 
+        $fg = Get-ForegroundProcessName
+        if ($fg -eq "steam" -or $fg -eq "steamwebhelper") { $steamHadFocus = $true }
+        $returnedToDesktop = ($steamHadFocus -and $fg -eq "explorer")
+
         $steamRunningNow = [bool](Get-Process -Name steam -ErrorAction SilentlyContinue)
-        if ($steamWasRunning -and -not $steamRunningNow) {
-            # Steam just exited (Big Picture's "Exit to Desktop") - force a
-            # clean repaint by restarting explorer.exe rather than trusting
-            # the pre-launched instance to redraw its taskbar/desktop on its
-            # own, and persist Desktop Mode so the next boot doesn't force
-            # Big Picture again (see header note above).
-            Write-Log "Steam closed - restarting explorer.exe for a clean desktop, persisting Desktop Mode"
+        $steamJustExited = ($steamWasRunning -and -not $steamRunningNow)
+
+        if ($returnedToDesktop -or $steamJustExited) {
+            # Big Picture's "Exit to Desktop" (steam may or may not still be
+            # running) - force a clean repaint by restarting explorer.exe
+            # rather than trusting the pre-launched instance to redraw its
+            # taskbar/desktop on its own after exclusive-fullscreen releases,
+            # and persist Desktop Mode so the next boot doesn't force Big
+            # Picture again (see header note above).
+            $why = if ($steamJustExited) { "Steam exited" } else { "desktop regained foreground" }
+            Write-Log "Exit to Desktop detected ($why) - restarting explorer.exe for a clean desktop, persisting Desktop Mode"
             Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 1
             Start-DesktopExplorer
             Set-GameModeState "desktop"
+            # Re-arm: only fire again once Steam/Big Picture is foreground anew.
+            $steamHadFocus = $false
         }
         $steamWasRunning = $steamRunningNow
     } catch {
