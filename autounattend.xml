@@ -22,12 +22,19 @@
        Set a real password later via Settings if you want one; autologon
        simply stops working at that point (expected, not a bug).
 
-  What this DELIBERATELY DOES NOT automate: disk partitioning/target
-  selection. Setup will still show the normal "Where do you want to install
-  Windows?" screen and wait for you to pick the drive — this answer file was
-  written without knowing the target machine's disk layout, and scripting
-  that step blind risks wiping the wrong disk. Everything before and after
-  that one screen is unattended.
+  What this DELIBERATELY DOES NOT automate:
+    - Disk partitioning/target selection. Setup will still show the normal
+      "Where do you want to install Windows?" screen and wait for you to pick
+      the drive — this answer file was written without knowing the target
+      machine's disk layout, and scripting that step blind risks wiping the
+      wrong disk.
+    - Network selection WHEN there's no wired connection. The OOBE network
+      page is shown (HideWirelessSetupInOOBE=false) so a Wi-Fi-only machine can
+      pick its SSID and enter the password — without internet at first boot,
+      first-boot-tweaks.ps1 can't install the driver/Steam/browser/apps. On a
+      wired LAN connection OOBE is already online and auto-advances past this
+      page, so it stays hands-off.
+  Everything else, before and after those, is unattended.
 
   To use: copy this file to the ROOT of your installer USB (same level as
   "sources", "boot", "efi" folders) — Setup auto-detects it there. If
@@ -129,7 +136,17 @@
         <HideEULAPage>true</HideEULAPage>
         <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
         <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
-        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <!-- SHOW the OOBE network page (was hidden). This is what gives the
+             machine internet at first boot, which first-boot-tweaks.ps1 needs
+             to install the GPU driver, Steam, the browser and the winget apps.
+             Behaviour: on a WIRED/LAN connection OOBE sees it's already online
+             and auto-advances (hands-off); with no cable it shows the Wi-Fi
+             picker so you select your network and enter the password, then
+             continues. BypassNRO (set in windowsPE above) still leaves an "I
+             don't have internet / continue" escape hatch if you deliberately
+             want to set the machine up offline — but then the app installs are
+             skipped until you connect and re-run the first-boot script. -->
+        <HideWirelessSetupInOOBE>false</HideWirelessSetupInOOBE>
         <NetworkLocation>Home</NetworkLocation>
         <SkipMachineOOBE>true</SkipMachineOOBE>
         <SkipUserOOBE>true</SkipUserOOBE>

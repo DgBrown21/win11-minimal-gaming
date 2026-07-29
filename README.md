@@ -66,7 +66,24 @@ different reliability characteristics:
   Combined with autologon, the machine goes power-on straight to Steam Big
   Picture, SteamOS/Deck-style; Big Picture's "Exit to Desktop" drops to a
   real, working desktop (no black screen), and a **"Game Mode" desktop icon**
-  jumps back into Big Picture at any time.
+  jumps back into Big Picture at any time. This holds on the **very first boot
+  too** — `first-boot-tweaks.ps1` launches Big Picture itself at the end of its
+  run (the Startup shortcut alone only kicks in from the second login), so
+  there's no one-time "lands on the bare desktop" first boot.
+
+- **Fullscreen "GAMING" boot loader.** A black, topmost splash with a big
+  GAMING logo, a progress ring with a light spinning around it, and a live
+  status line covers the desktop during the whole first-boot install phase
+  (drivers, Steam, apps) and during the brief pre-Big-Picture moment on every
+  login — so setup never shows as a visible Windows desktop doing work.
+  explorer.exe still stays the real shell underneath (`Show-BootLoader.ps1`).
+
+- **Latest GPU drivers on install.** Because Windows Update is disabled, the
+  GPU driver is fetched straight from the vendor at first boot: NVIDIA's newest
+  Game Ready Driver (resolved via NVIDIA's public lookup API and silent-
+  installed), Intel's official Driver & Support Assistant (winget), and — since
+  AMD has no unattended path — AMD's auto-detect installer staged on the
+  desktop. Vendor is detected live; every branch is best-effort and non-fatal.
 
   This deliberately does **not** replace the shell. An earlier version of this
   project made powershell the `Winlogon\Shell` and hand-launched explorer;
@@ -193,8 +210,9 @@ boot/PnP subsystem.
 | `build-windows.ps1` | Fetches the official Microsoft ISO, extracts it, runs `slim-image.ps1`, injects the answer file + first-boot script, rebuilds with `oscdimg`. |
 | `slim-image.ps1` | The core size-reduction work — offline DISM servicing against `install.wim`. Can be re-run standalone against an already-extracted `build\extracted` folder while iterating, without re-downloading the source ISO. |
 | `autounattend.xml` | The unattended answer file. |
-| `first-boot-tweaks.ps1` | OneDrive removal + Edge runtime guard, Windows Update disable, telemetry-off/privacy pass, footprint service disables, performance power plan, Defender safety net, Steam install + Big Picture autostart — runs once at first login. |
-| `Start-GameMode.ps1` | Per-user Startup launcher: shows a black splash and launches Steam Big Picture on top of the normal desktop (explorer.exe stays the shell). Staged onto the ISO by `build-windows.ps1`, wired up by `first-boot-tweaks.ps1`. |
+| `first-boot-tweaks.ps1` | OneDrive removal + Edge runtime guard, Windows Update disable, telemetry-off/privacy pass, footprint service disables, performance power plan, Defender safety net, **latest GPU driver fetch** (vendors direct, since WU is off), Steam install + Big Picture autostart, and the fullscreen boot loader that covers the desktop during it all — runs once at first login. |
+| `Start-GameMode.ps1` | Per-user Startup launcher: shows the animated loader and launches Steam Big Picture on top of the normal desktop (explorer.exe stays the shell). Staged onto the ISO by `build-windows.ps1`, wired up by `first-boot-tweaks.ps1`. |
+| `Show-BootLoader.ps1` | The fullscreen "GAMING" boot loader — a black topmost splash with a big logo, a progress ring with a spinning light, and a live status line (what's loading/installing). Driven by a status file so it animates smoothly while the caller does blocking installs. Used by both first boot and every login. |
 | `Win11-Minimal.iso` | **Not in this repo** — build artifact, see `.gitignore`. Build it yourself; redistributing Microsoft's install media isn't something this repo does. |
 
 ## Requirements to build
@@ -213,6 +231,22 @@ a "path already mounted" error before that, run manually first:
 ```powershell
 dism /Cleanup-Mountpoints
 ```
+
+**If the apps/drivers didn't install at first boot**, it's almost always no
+internet during first boot — the GPU driver, Steam, the browser and the winget
+apps are all fetched online. This build now shows the **OOBE network page**
+(`HideWirelessSetupInOOBE=false` in `autounattend.xml`), so connect there:
+plug in a wired LAN cable (OOBE auto-continues) or pick your Wi-Fi and enter the
+password. `first-boot-tweaks.ps1` also waits up to 5 min for connectivity and
+resolves `winget` by full path (it's frequently not on PATH that early), so a
+slightly-late network still works. If you set the machine up offline anyway,
+connect afterwards and just re-run the script — it's safe to run again:
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\first-boot-tweaks.ps1
+```
+The full run log is at `C:\ProgramData\first-boot-tweaks.log` — it records
+exactly what installed, what was skipped, and why (network/winget state
+included).
 
 Because `explorer.exe` stays the real shell, there's no black-desktop failure
 mode to recover from here — if Big Picture ever fails to launch, you're simply

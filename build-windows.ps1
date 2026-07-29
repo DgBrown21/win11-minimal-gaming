@@ -156,6 +156,7 @@ $oemScripts = Join-Path $extractDir "sources\`$OEM`$\`$`$\Setup\Scripts"
 New-Item -ItemType Directory -Path $oemScripts -Force | Out-Null
 Copy-Item (Join-Path $ScriptDir "first-boot-tweaks.ps1") $oemScripts -Force
 Copy-Item (Join-Path $ScriptDir "Start-GameMode.ps1") $oemScripts -Force
+Copy-Item (Join-Path $ScriptDir "Show-BootLoader.ps1") $oemScripts -Force
 
 # ── 5. Rebuild with oscdimg ───────────────────────────────────────────────
 # -m: ignore the (irrelevant here) max-image-size limit

@@ -33,17 +33,34 @@
          once the desktop is reached. Big Picture's own "Exit to Desktop"
          always gets you to a normal desktop — no custom shell replacement,
          explorer.exe stays the shell throughout.
-      6. Extra apps via winget (all best-effort/non-fatal): Google Chrome,
-         Helium (private browser, set as default via SetUserFTA), Files
-         (file manager, set as default via a folder-open override), Git for
-         Windows (required by Claude Code), Claude Code, and opencode. winget
-         is kept in the image (slim-image.ps1 no longer removes
+      6. Web browser — Helium, the machine's ONLY browser now that Edge is
+         removed offline, so it gets a GUARANTEED install: winget first, then a
+         fallback to its official signed installer from GitHub (latest resolved
+         via the GitHub API, run silently), and it's set as the default browser
+         via SetUserFTA. Plus best-effort/non-fatal extra apps via winget:
+         Google Chrome, Files (file manager, set as default via a folder-open
+         override), Git for Windows (required by Claude Code), Claude Code, and
+         opencode. winget is kept in the image (slim-image.ps1 no longer removes
          DesktopAppInstaller) specifically so these can install.
       7. Windows autologon — enabled for the account this script is running
          as. Paired with the blank password autounattend.xml creates it
          with (see that file's header for the safety reasoning); the net
          effect is boot straight to desktop, then straight into Steam Big
          Picture, no login screen and no manual Steam launch needed.
+      8. Latest GPU drivers — because Windows Update is disabled here, the
+         GPU driver (the one that actually matters on a gaming box) is
+         fetched straight from the vendor: NVIDIA's latest Game Ready Driver
+         resolved + silent-installed via NVIDIA's public lookup API, Intel's
+         official Driver & Support Assistant via winget, and AMD's auto-detect
+         installer staged on the desktop (AMD has no unattended path). Vendor
+         detected live via Win32_VideoController; all best-effort/non-fatal.
+      9. Boot loader + first-boot Big Picture launch. A fullscreen, topmost
+         "GAMING" splash (Show-BootLoader.ps1) covers the desktop for the whole
+         first-boot install phase, showing a spinning progress ring and a live
+         status line of what's installing. At the end this script launches Big
+         Picture itself and then dismisses the loader — so the FIRST boot ends
+         in Steam too, not just every boot after it (the Startup shortcut only
+         fires from the second login onward).
 
     HONEST LIMITS:
       - Appx removal already happened offline (slim-image.ps1) — nothing
@@ -63,11 +80,99 @@
 $ErrorActionPreference = "Continue"
 $LogFile = Join-Path $env:ProgramData "first-boot-tweaks.log"
 
+# Set by the boot-loader bootstrap below once the status file exists. Until
+# then Set-BootStatus is a no-op, so Write-Log is safe to call before it.
+$script:BootStatusFile = $null
+function Set-BootStatus {
+    param([string]$Text)
+    if (-not $script:BootStatusFile) { return }
+    # FileShare.ReadWrite so the loader's ~30 Hz polling never blocks this write
+    # (and vice versa) — critical for the "__DONE__" sentinel getting through.
+    try {
+        $fs = [System.IO.File]::Open($script:BootStatusFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        try {
+            $sw = New-Object System.IO.StreamWriter($fs)
+            $sw.Write($Text); $sw.Flush()
+        } finally { $fs.Dispose() }
+    } catch {}
+}
+
 function Write-Log {
     param([string]$Message, [string]$Color = "White")
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
     Write-Host $line -ForegroundColor $Color
     Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue
+    # Mirror section headers ("=== Foo ===", exactly three '=') onto the
+    # fullscreen loader as the live "what's happening now" status line.
+    if ($Message -match '^===\s(.+?)\s===$') { Set-BootStatus $Matches[1] }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INSTALL-PHASE READINESS HELPERS — the #1 reason "nothing installed" on a real
+# first boot. During OOBE FirstLogonCommands the network stack may not be up
+# yet, and `winget` is frequently NOT resolvable as a bare command: its
+# WindowsApps alias isn't on PATH and the App Installer package may not be
+# registered for this session. Either one makes every download / winget call
+# silently no-op. These resolve winget by REAL path (with a registration nudge
+# and retry) and wait for actual connectivity before anything tries to install.
+# ═══════════════════════════════════════════════════════════════════════════
+$script:WingetExe   = $null
+$script:HaveNetwork = $false
+
+function Wait-ForNetwork {
+    param([int]$TimeoutSec = 300)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        try { if (Test-Connection -ComputerName "8.8.8.8" -Count 1 -Quiet -ErrorAction SilentlyContinue) { return $true } } catch {}
+        try {
+            $r = Invoke-WebRequest -Uri "http://www.msftconnecttest.com/connecttest.txt" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            if ($r.StatusCode -eq 200) { return $true }
+        } catch {}
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Resolve-WingetExe {
+    param([int]$TimeoutSec = 240)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        # Preferred: the real winget.exe inside the registered App Installer
+        # package (avoids the WindowsApps ACL / PATH-alias problems entirely).
+        $pkg = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($pkg -and $pkg.InstallLocation) {
+            $candidate = Join-Path $pkg.InstallLocation "winget.exe"
+            if (Test-Path $candidate) { return $candidate }
+        }
+        # Next: glob the package folder directly.
+        $exe = Get-ChildItem "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+        if ($exe) { return $exe.FullName }
+        # Last: PATH, if it happens to be there.
+        $cmd = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+        # Still nothing — nudge per-user registration of the App Installer and retry.
+        $srcPkgs = if ($pkg) { @($pkg) } else { Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue }
+        foreach ($sp in $srcPkgs) {
+            try { Add-AppxPackage -DisableDevelopmentMode -Register "$($sp.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue } catch {}
+        }
+        Start-Sleep -Seconds 6
+    } while ((Get-Date) -lt $deadline)
+    return $null
+}
+
+function Install-WingetApp {
+    param([string]$Id, [string]$Name)
+    if (-not $script:HaveNetwork) { Write-Log "    Skipping $Name — no network." "Yellow"; return $false }
+    if (-not $script:WingetExe)   { Write-Log "    Skipping $Name — winget unavailable." "Yellow"; return $false }
+    Write-Log "  Installing $Name ($Id)..."
+    try {
+        & $script:WingetExe install --id $Id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Log "    $Name installed."; return $true }
+        Write-Log "    $Name install returned exit code $LASTEXITCODE (non-fatal, continuing)." "Yellow"; return $false
+    } catch {
+        Write-Log "    $Name install failed (non-fatal, continuing): $_" "Yellow"; return $false
+    }
 }
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -76,6 +181,38 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 Write-Log "==== first-boot-tweaks.ps1 starting ===="
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 0. BOOT LOADER — cover the desktop with the animated "GAMING" splash NOW
+# ═══════════════════════════════════════════════════════════════════════════
+# First boot does a lot of visible work (driver + Steam + app installs) on a
+# freshly-painted desktop. Launch the fullscreen spinning-"GAMING" loader
+# immediately (a separate process, so our blocking installs below don't freeze
+# it) and drive its status line via Set-BootStatus / the section headers in
+# Write-Log. It's dismissed at the very end, right after Big Picture paints.
+# Entirely non-fatal: if the loader can't start, first boot just runs on the
+# visible desktop as before.
+$GameModeDir = Join-Path $env:ProgramData "GameMode"
+New-Item -ItemType Directory -Path $GameModeDir -Force -ErrorAction SilentlyContinue | Out-Null
+$script:BootStatusFile = Join-Path $GameModeDir "boot-status.txt"
+Set-BootStatus "Preparing Game Mode..."
+$loaderProc = $null
+try {
+    $srcLoader    = "C:\Windows\Setup\Scripts\Show-BootLoader.ps1"
+    $LoaderScript = Join-Path $GameModeDir "Show-BootLoader.ps1"
+    if (Test-Path $srcLoader) { Copy-Item -Path $srcLoader -Destination $LoaderScript -Force }
+    if (Test-Path $LoaderScript) {
+        $loaderProc = Start-Process powershell.exe -PassThru -ArgumentList @(
+            "-NoLogo","-NoProfile","-WindowStyle","Hidden","-ExecutionPolicy","Bypass",
+            "-File","`"$LoaderScript`"","-StatusFile","`"$script:BootStatusFile`""
+        )
+        Write-Log "Boot loader launched (PID $($loaderProc.Id)) — desktop is covered for first boot."
+    } else {
+        Write-Log "Show-BootLoader.ps1 not found in Setup\Scripts — continuing without the fullscreen splash (non-fatal)." "Yellow"
+    }
+} catch {
+    Write-Log "Could not start the boot loader (non-fatal, first boot runs on the visible desktop): $_" "Yellow"
+}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. MICROSOFT EDGE — runtime guard (offline removal is done in slim-image.ps1 STEP 6c)
@@ -380,6 +517,168 @@ foreach ($tmpl in @("CDPUserSvc", "MessagingService", "PimIndexMaintenanceSvc", 
 Write-Log "  Disabled non-gaming services (link tracking, Superfetch, Spooler, Connected Devices, Maps, Geolocation, RetailDemo, Wallet, Fax, Telephony, Biometric, NFC/SmartCard, SMS, PCA, RemoteRegistry + per-user Messaging/Contacts/UserData template services)."
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 3d-net. CONNECTIVITY & WINGET READINESS — gate before anything downloads
+# ═══════════════════════════════════════════════════════════════════════════
+# Everything below (drivers, Steam, browser, apps) needs the network up AND
+# winget resolvable. Neither is guaranteed this early in first boot, so wait
+# for them explicitly here — this is what makes the installs below actually run
+# instead of silently no-op'ing (the "nothing installed" bug).
+Write-Log "=== Waiting for network ==="
+$script:HaveNetwork = Wait-ForNetwork -TimeoutSec 300
+if ($script:HaveNetwork) {
+    Write-Log "  Network is up."
+} else {
+    Write-Log "  No internet after 5 min — downloads/installs will be SKIPPED. Connect to a network (OOBE should have shown the Wi-Fi/network page; a wired LAN cable also works) and re-run C:\Windows\Setup\Scripts\first-boot-tweaks.ps1 to finish app setup." "Red"
+}
+Write-Log "=== Resolving winget ==="
+$script:WingetExe = Resolve-WingetExe -TimeoutSec 240
+if ($script:WingetExe) {
+    Write-Log "  winget resolved at: $script:WingetExe"
+} else {
+    Write-Log "  winget could not be resolved at first boot — winget-only apps (Chrome, Files, Git, Claude Code, opencode) will be skipped; Steam/Helium fall back to their direct installers." "Yellow"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3e. LATEST GPU DRIVERS — fetch straight from the vendor (WU is disabled here)
+# ═══════════════════════════════════════════════════════════════════════════
+# Because Windows Update is turned OFF above, Windows won't pull GPU drivers
+# from its online driver catalog the way a normal install does — so on a
+# gaming box, the one driver that actually matters has to be fetched here.
+# GPU vendors ONLY by design (no chipset/NIC/audio); detected live via
+# Win32_VideoController. Every branch is best-effort / NON-FATAL: any failure
+# logs a manual download link and first boot keeps going.
+Write-Log "=== Latest GPU drivers ==="
+$gpus = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -and $_.PNPDeviceID -like "PCI\*" })
+if (-not $gpus) {
+    Write-Log "  No PCI display adapter detected (VM / basic display adapter?) — skipping GPU driver fetch." "Yellow"
+} else {
+    # Map each detected adapter to a vendor bucket (a box can have an iGPU +
+    # dGPU, so more than one may fire).
+    $vendors = @{}
+    foreach ($g in $gpus) {
+        $hay = "$($g.Name) $($g.AdapterCompatibility)"
+        if     ($hay -match "NVIDIA")                       { $vendors["NVIDIA"] = $g.Name }
+        elseif ($hay -match "AMD|Advanced Micro|Radeon")    { $vendors["AMD"]    = $g.Name }
+        elseif ($hay -match "Intel")                        { $vendors["Intel"]  = $g.Name }
+    }
+    if (-not $vendors.Count) {
+        Write-Log "  Display adapter(s) found but vendor unrecognized: $($gpus.Name -join ', '). Skipping." "Yellow"
+    } else {
+        Write-Log "  Detected GPU vendor(s): $($vendors.Keys -join ', ')"
+    }
+
+    # ── NVIDIA — latest Game Ready Driver via NVIDIA's public lookup API ───────
+    # No NVIDIA GPU driver ships in winget, so resolve the newest Game Ready
+    # Driver straight from NVIDIA's public driver-lookup API (the same endpoints
+    # the open-source TinyNvidiaUpdateChecker uses). The product-series / product
+    # IDs are DISCOVERED from the detected adapter name at runtime — only the OS
+    # id and the API URLs are constants — so a brand-new card generation needs no
+    # code change. Fragile by nature (it's an undocumented public API): if NVIDIA
+    # changes it, the whole block just logs the manual link and moves on.
+    if ($script:HaveNetwork -and $vendors.ContainsKey("NVIDIA")) {
+        $nvName = $vendors["NVIDIA"]
+        Write-Log "  [NVIDIA] $nvName — resolving latest Game Ready Driver..."
+        try {
+            $lookupBase = "https://www.nvidia.com/Download/API/lookupValueSearch/"
+            function Get-NvLookup {
+                param([int]$TypeID, [string]$ParentID)
+                $uri = "$lookupBase`?TypeID=$TypeID"
+                if ($ParentID) { $uri += "&ParentID=$ParentID" }
+                (Invoke-RestMethod -Uri $uri -UseBasicParsing -TimeoutSec 30).LookupValueSearch.LookupValues
+            }
+            # Pull the model out of the adapter name, e.g. "RTX 4070" / "GTX 1660".
+            if ($nvName -notmatch "(RTX|GTX|GT|MX)\s*0*([0-9]{3,4})") {
+                throw "Could not parse an NVIDIA model number from '$nvName'."
+            }
+            $nvPrefix = $Matches[1]                       # RTX / GTX / ...
+            $nvModel  = $Matches[2]                        # e.g. 4070
+            $nvGen    = if ($nvModel.Length -ge 4) { $nvModel.Substring(0,2) } else { $nvModel.Substring(0,1) }  # 4070->40, 970->9
+            Write-Log "    Parsed model: $nvPrefix $nvModel (series generation '$nvGen')."
+
+            # 1) Product Type -> GeForce
+            $ptype = Get-NvLookup -TypeID 1 | Where-Object { $_.Name -match "GeForce" } | Select-Object -First 1
+            if (-not $ptype) { throw "GeForce product type not found in NVIDIA lookup." }
+            # 2) Product Series (psid) — e.g. "GeForce RTX 40 Series"
+            $series = Get-NvLookup -TypeID 2 -ParentID $ptype.Value |
+                Where-Object { $_.Name -match [regex]::Escape($nvPrefix) -and $_.Name -match "\b$nvGen\b.*Series" } |
+                Select-Object -First 1
+            if (-not $series) { throw "No matching product series for '$nvPrefix $nvGen Series'." }
+            # 3) Product (pfid) — the specific card, matched by full model number
+            $product = Get-NvLookup -TypeID 3 -ParentID $series.Value |
+                Where-Object { $_.Name -match "\b$nvModel\b" } | Select-Object -First 1
+            if (-not $product) {
+                # Fall back to any product in the series so we still get a WHQL driver
+                $product = Get-NvLookup -TypeID 3 -ParentID $series.Value | Select-Object -First 1
+                if ($product) { Write-Log "    Exact model not listed; using series driver ($($product.Name))." "Yellow" }
+            }
+            if (-not $product) { throw "No product entry under series '$($series.Name)'." }
+            Write-Log "    NVIDIA IDs -> psid=$($series.Value) pfid=$($product.Value) ($($series.Name) / $($product.Name))."
+
+            # 4) Driver lookup. osID 135 = Windows 11 x64 (DCH). dch=1 = DCH driver.
+            $ajax = "https://gfwsl.geforce.com/services_toolkit/services/com/nvidia/services/AjaxDriverService.php"
+            $q = "func=DriverManualLookup&psid=$($series.Value)&pfid=$($product.Value)&osID=135&languageCode=1033&isWHQL=1&dch=1&sort1=0&numberOfResults=1"
+            $drv = Invoke-RestMethod -Uri "$ajax`?$q" -UseBasicParsing -TimeoutSec 30
+            $info = $drv.IDS[0].downloadInfo
+            if (-not $info -or -not $info.DownloadURL) { throw "NVIDIA lookup returned no download URL." }
+            Write-Log "    Latest Game Ready Driver: v$($info.Version)"
+
+            # 5) Download + silent install. The full DCH installer .exe accepts
+            #    -s (silent) -clean (clean install) -noreboot directly.
+            $nvExe = Join-Path $env:TEMP "nvidia-$($info.Version)-driver.exe"
+            Write-Log "    Downloading $($info.DownloadURL) ..."
+            $oldPP = $ProgressPreference; $ProgressPreference = "SilentlyContinue"
+            Invoke-WebRequest -Uri $info.DownloadURL -OutFile $nvExe -UseBasicParsing -TimeoutSec 1800
+            $ProgressPreference = $oldPP
+            Write-Log "    Installing NVIDIA driver silently (-s -clean -noreboot)..."
+            $p = Start-Process -FilePath $nvExe -ArgumentList "-s","-clean","-noreboot" -Wait -PassThru
+            Write-Log "    NVIDIA driver installer exit code: $($p.ExitCode) (a reboot may be needed to fully apply)."
+        } catch {
+            Write-Log "    [NVIDIA] Auto driver fetch failed (non-fatal): $_" "Yellow"
+            Write-Log "    Install the latest manually from https://www.nvidia.com/download/index.aspx" "Cyan"
+        }
+    }
+
+    # ── AMD — no headless/silent path exists ──────────────────────────────────
+    # AMD's consumer Adrenalin driver isn't in winget (only the wrong
+    # 'AMD Software: Cloud Edition' enterprise SKU is), and the auto-detect
+    # installer can't do an unattended driver install. Rather than pop a GUI
+    # behind Steam Big Picture at first login, download AMD's official
+    # auto-detect installer to the Public Desktop and leave a one-click
+    # instruction. Honest limit: AMD is the one vendor this can't fully automate.
+    if ($script:HaveNetwork -and $vendors.ContainsKey("AMD")) {
+        Write-Log "  [AMD] $($vendors['AMD']) — no unattended install path; staging AMD's auto-detect installer."
+        try {
+            # NOTE: AMD has no stable version-less installer URL, so this is a
+            # pinned Adrenalin web-setup link and WILL age out over time. That's
+            # intentionally harmless: if it 404s, the catch below just logs the
+            # amd.com/support link instead. Bump the version when refreshing.
+            $amdUrl = "https://drivers.amd.com/drivers/installer/24.10/whql/amd-software-adrenalin-edition-24.10.1-minimalsetup-241001_web.exe"
+            $amdDir = Join-Path $env:PUBLIC "Desktop"
+            $amdExe = Join-Path $amdDir "Install AMD Graphics Driver.exe"
+            $oldPP = $ProgressPreference; $ProgressPreference = "SilentlyContinue"
+            Invoke-WebRequest -Uri $amdUrl -OutFile $amdExe -UseBasicParsing -TimeoutSec 600
+            $ProgressPreference = $oldPP
+            Write-Log "    Staged AMD installer on the desktop: '$amdExe'. Run it once to fetch + install the latest Adrenalin driver." "Cyan"
+        } catch {
+            Write-Log "    [AMD] Could not stage the AMD installer (non-fatal): $_" "Yellow"
+            Write-Log "    Get the latest Adrenalin driver from https://www.amd.com/en/support" "Cyan"
+        }
+    }
+
+    # ── Intel — official Driver & Support Assistant (winget) ───────────────────
+    # Intel's supported route for graphics driver updates is the Driver &
+    # Support Assistant, which IS in winget. It installs headless, then updates
+    # the Intel GPU driver from its own service. Best-effort / non-fatal.
+    if ($script:HaveNetwork -and $vendors.ContainsKey("Intel")) {
+        Write-Log "  [Intel] $($vendors['Intel']) — installing Intel Driver & Support Assistant (it scans for GPU driver updates on launch)."
+        if (-not (Install-WingetApp -Id "Intel.IntelDriverAndSupportAssistant" -Name "Intel Driver & Support Assistant")) {
+            Write-Log "    If that didn't take, get Intel drivers from https://www.intel.com/content/www/us/en/download-center/home.html" "Cyan"
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 4. SAFETY NET — confirm Windows Defender is untouched
 # ═══════════════════════════════════════════════════════════════════════════
 # Not a "change" — this only ever pushes Defender's services/tasks back to
@@ -406,22 +705,22 @@ Write-Log "  Confirmed Windows Defender scheduled tasks are enabled."
 Write-Log "=== Steam ==="
 $steamExe = "${env:ProgramFiles(x86)}\Steam\steam.exe"
 if (-not (Test-Path $steamExe)) {
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    $installed = $false
-    if ($winget) {
-        Write-Log "  Installing Steam via winget..."
-        try {
-            winget install --id Valve.Steam -e --silent --accept-package-agreements --accept-source-agreements
-            $installed = $true
-        } catch {
-            Write-Log "  winget install failed, falling back to direct download: $_" "Yellow"
+    if ($script:WingetExe) { Install-WingetApp -Id "Valve.Steam" -Name "Steam" | Out-Null }
+    if (-not (Test-Path $steamExe)) {
+        if ($script:HaveNetwork) {
+            Write-Log "  winget didn't land Steam — downloading the official Steam installer..."
+            $installerPath = Join-Path $env:TEMP "SteamSetup.exe"
+            try {
+                $oldPP = $ProgressPreference; $ProgressPreference = "SilentlyContinue"
+                Invoke-WebRequest -Uri "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe" -OutFile $installerPath -UseBasicParsing
+                $ProgressPreference = $oldPP
+                Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+            } catch {
+                Write-Log "  Steam direct download failed (non-fatal): $_" "Yellow"
+            }
+        } else {
+            Write-Log "  No network — cannot install Steam now." "Red"
         }
-    }
-    if (-not $installed -or -not (Test-Path $steamExe)) {
-        Write-Log "  Downloading the official Steam installer..."
-        $installerPath = Join-Path $env:TEMP "SteamSetup.exe"
-        Invoke-WebRequest -Uri "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe" -OutFile $installerPath
-        Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
     }
 }
 if (Test-Path $steamExe) {
@@ -512,6 +811,64 @@ start "" powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy 
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 5b-0. WEB BROWSER (Helium) — GUARANTEED install (winget + direct fallback)
+# ═══════════════════════════════════════════════════════════════════════════
+# Edge is removed OFFLINE in slim-image.ps1, so Helium is the machine's ONLY
+# browser — it has to actually end up installed, not merely attempted. Unlike
+# the other extra apps (best-effort winget in 5b), this tries winget first and
+# then FALLS BACK to Helium's official installer from its GitHub releases —
+# resolved via the GitHub API so the download link never goes stale — run
+# silently (/S; it's an NSIS installer). Set as the default browser in 5c.
+# Still non-fatal to first boot, but logged loudly if no browser could be had.
+Write-Log "=== Web browser (Helium) ==="
+function Test-HeliumInstalled {
+    # Either signal means we have a working browser: the StartMenuInternet
+    # registration Helium creates, or its executable on disk.
+    foreach ($root in @("HKLM:\SOFTWARE\Clients\StartMenuInternet", "HKCU:\SOFTWARE\Clients\StartMenuInternet")) {
+        if (Get-ChildItem $root -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like "*Helium*" }) { return $true }
+    }
+    foreach ($p in @(
+        "$env:LOCALAPPDATA\Programs\Helium\helium.exe",
+        "$env:LOCALAPPDATA\Helium\Application\helium.exe",
+        "$env:ProgramFiles\Helium\helium.exe",
+        "${env:ProgramFiles(x86)}\Helium\helium.exe"
+    )) { if (Test-Path $p) { return $true } }
+    return $false
+}
+if ($script:WingetExe) {
+    Install-WingetApp -Id "ImputNet.Helium" -Name "Helium browser" | Out-Null
+} else {
+    Write-Log "  winget unavailable — going straight to Helium's GitHub installer." "Yellow"
+}
+if (-not (Test-HeliumInstalled)) {
+    if ($script:HaveNetwork) {
+        Write-Log "  Helium not present after winget — falling back to the official GitHub installer." "Yellow"
+        try {
+            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/imputnet/helium-windows/releases/latest" -Headers @{ "User-Agent" = "win11-minimal-gaming" } -UseBasicParsing -TimeoutSec 60
+            $asset = $rel.assets | Where-Object { $_.name -match "x64-installer\.exe$" } | Select-Object -First 1
+            if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -match "installer\.exe$" } | Select-Object -First 1 }
+            if (-not $asset) { throw "No Windows installer asset in the latest Helium release." }
+            $heliumExe = Join-Path $env:TEMP $asset.name
+            Write-Log "    Downloading $($asset.browser_download_url) ..."
+            $oldPP = $ProgressPreference; $ProgressPreference = "SilentlyContinue"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $heliumExe -UseBasicParsing -TimeoutSec 600
+            $ProgressPreference = $oldPP
+            Write-Log "    Installing Helium silently (/S)..."
+            Start-Process -FilePath $heliumExe -ArgumentList "/S" -Wait
+        } catch {
+            Write-Log "    Helium direct-download install failed: $_" "Red"
+        }
+    } else {
+        Write-Log "  No network — cannot install a browser now." "Red"
+    }
+}
+if (Test-HeliumInstalled) {
+    Write-Log "  Helium browser is installed."
+} else {
+    Write-Log "  WARNING: no browser could be installed (Edge is removed) — install one manually from https://helium.computer/ once online." "Red"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 5b. EXTRA APPS — browsers, file manager, AI CLIs (all via winget)
 # ═══════════════════════════════════════════════════════════════════════════
 # All installed from winget's main community source. winget is deliberately
@@ -519,37 +876,25 @@ start "" powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy 
 # Microsoft.DesktopAppInstaller). Everything here is best-effort/non-fatal:
 # a failed app install just logs and continues — it never aborts first boot.
 #   - Google Chrome            Google.Chrome
-#   - Helium (private browser) ImputNet.Helium   (set as default — see 5c)
+#   (Helium, the default browser, is installed separately in 5b-0 with a
+#    direct-download fallback — it's the machine's only browser, so it can't
+#    be left to this best-effort loop.)
 #   - Files (file manager)     Files-Community.Files (set as default — see 5c)
 #   - Git for Windows          Git.Git           (REQUIRED by Claude Code — it
 #                                                  shells out to Git Bash)
 #   - Claude Code (AI CLI)     Anthropic.ClaudeCode
 #   - opencode (AI CLI)        SST.opencode
 Write-Log "=== Extra apps (winget) ==="
-$winget = Get-Command winget -ErrorAction SilentlyContinue
-if (-not $winget) {
-    Write-Log "  winget not found on this image — cannot install the extra apps. (slim-image.ps1 is supposed to KEEP Microsoft.DesktopAppInstaller; check that.)" "Red"
+if (-not $script:WingetExe) {
+    Write-Log "  winget could not be resolved — skipping the extra winget apps (Chrome, Files, Git, Claude Code, opencode). Run them later once winget works: winget install --id <Id> -e" "Red"
+} elseif (-not $script:HaveNetwork) {
+    Write-Log "  No network — skipping the extra winget apps." "Red"
 } else {
-    function Install-WingetApp {
-        param([string]$Id, [string]$Name)
-        Write-Log "  Installing $Name ($Id)..."
-        try {
-            winget install --id $Id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-            if ($LASTEXITCODE -eq 0) {
-                Write-Log "    $Name installed."
-            } else {
-                Write-Log "    $Name install returned exit code $LASTEXITCODE (non-fatal, continuing)." "Yellow"
-            }
-        } catch {
-            Write-Log "    $Name install failed (non-fatal, continuing): $_" "Yellow"
-        }
-    }
-    Install-WingetApp -Id "Google.Chrome"        -Name "Google Chrome"
-    Install-WingetApp -Id "ImputNet.Helium"      -Name "Helium browser"
-    Install-WingetApp -Id "Files-Community.Files" -Name "Files (file manager)"
-    Install-WingetApp -Id "Git.Git"              -Name "Git for Windows (Claude Code prerequisite)"
-    Install-WingetApp -Id "Anthropic.ClaudeCode" -Name "Claude Code"
-    Install-WingetApp -Id "SST.opencode"         -Name "opencode"
+    Install-WingetApp -Id "Google.Chrome"         -Name "Google Chrome"           | Out-Null
+    Install-WingetApp -Id "Files-Community.Files" -Name "Files (file manager)"     | Out-Null
+    Install-WingetApp -Id "Git.Git"               -Name "Git for Windows (Claude Code prerequisite)" | Out-Null
+    Install-WingetApp -Id "Anthropic.ClaudeCode"  -Name "Claude Code"             | Out-Null
+    Install-WingetApp -Id "SST.opencode"          -Name "opencode"               | Out-Null
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -644,6 +989,44 @@ Set-ItemProperty -Path $WinlogonPath -Name "AutoAdminLogon" -Value "1"
 Set-ItemProperty -Path $WinlogonPath -Name "DefaultUserName" -Value $currentUser
 Set-ItemProperty -Path $WinlogonPath -Name "DefaultDomainName" -Value "$env:COMPUTERNAME"
 Write-Log "  Autologon enabled for local account '$currentUser'."
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7. FIRST-BOOT LAUNCH — end first boot IN Big Picture, then drop the splash
+# ═══════════════════════════════════════════════════════════════════════════
+# The Startup-folder "Game Mode" shortcut set up in step 5a only fires from the
+# NEXT login onward — it doesn't exist yet when Windows processes Startup for
+# this very first login. So first boot would otherwise end on the bare desktop.
+# Launch Big Picture here too, hold the loader until Steam's UI has painted,
+# then signal the loader to close — so the machine goes straight into Steam on
+# the first boot exactly like every boot after it.
+Write-Log "=== Launching Steam Big Picture ==="
+try {
+    $steamExeFinal = "${env:ProgramFiles(x86)}\Steam\steam.exe"
+    if (Test-Path $steamExeFinal) {
+        Start-Process -FilePath $steamExeFinal -ArgumentList "-start steam://open/bigpicture" -ErrorAction SilentlyContinue
+        Write-Log "  Launched Big Picture; holding the loader until steamwebhelper appears."
+        $waited = 0
+        while ($waited -lt 90 -and -not (Get-Process -Name steamwebhelper -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Seconds 1; $waited++
+        }
+        Start-Sleep -Seconds 4   # let Big Picture actually paint before we uncover it
+    } else {
+        Write-Log "  Steam not confirmed installed — first boot will end on the desktop; Big Picture starts on next login." "Yellow"
+    }
+} catch {
+    Write-Log "  Big Picture launch failed (non-fatal, desktop remains): $_" "Yellow"
+}
+
+# Tell the fullscreen loader to close (reveals Big Picture, or the desktop).
+Set-BootStatus "__DONE__"
+Start-Sleep -Milliseconds 750
+if ($loaderProc) {
+    try {
+        if (-not $loaderProc.HasExited) { Start-Sleep -Seconds 2 }
+        if (-not $loaderProc.HasExited) { $loaderProc.CloseMainWindow() | Out-Null }
+        if (-not $loaderProc.HasExited) { Stop-Process -Id $loaderProc.Id -Force -ErrorAction SilentlyContinue }
+    } catch {}
+}
 
 # ═══════════════════════════════════════════════════════════════════════════
 Write-Log "==== first-boot-tweaks.ps1 finished ===="
