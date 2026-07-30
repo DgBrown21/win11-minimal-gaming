@@ -125,11 +125,20 @@ if (-not $loaderProc) {
 $steamExe = "${env:ProgramFiles(x86)}\Steam\steam.exe"
 try {
     if (Test-Path $steamExe) {
-        # -bigpicture boots Steam STRAIGHT into Big Picture on a cold start,
-        # faster than opening the normal client and then navigating to Big
-        # Picture through the steam:// protocol handler.
-        Start-Process -FilePath $steamExe -ArgumentList "-bigpicture"
-        Write-Log "Launched Steam Big Picture"
+        if (Get-Process -Name steam -ErrorAction SilentlyContinue) {
+            # Steam is ALREADY running (re-entry via the Game Mode icon, or it was
+            # left open as a normal window). -bigpicture on an already-running
+            # client just focuses the existing window — it does NOT switch modes.
+            # The steam://open/bigpicture URL tells the running client to actually
+            # open Big Picture.
+            Start-Process -FilePath $steamExe -ArgumentList "-start","steam://open/bigpicture"
+            Write-Log "Steam already running - sent it into Big Picture via steam://open/bigpicture"
+        } else {
+            # Cold start (the login case): -bigpicture boots STRAIGHT into Big
+            # Picture with no normal client window first — the fast path.
+            Start-Process -FilePath $steamExe -ArgumentList "-bigpicture"
+            Write-Log "Launched Steam straight into Big Picture (-bigpicture, cold start)"
+        }
     } else {
         Write-Log "Steam not found at $steamExe - dropping to desktop"
     }

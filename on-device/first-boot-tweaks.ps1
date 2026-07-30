@@ -175,6 +175,17 @@ function Install-WingetApp {
     }
 }
 
+# Small download helper — every fetch below wants the same "silence the progress
+# bar (it makes Invoke-WebRequest crawl) then restore it" dance, so do it once
+# here instead of repeating it at each call site. try/finally always restores.
+function Get-File {
+    param([string]$Uri, [string]$OutFile, [int]$TimeoutSec = 600)
+    $old = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try { Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec }
+    finally { $ProgressPreference = $old }
+}
+
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Log "This script must be run as Administrator. Re-launch an elevated PowerShell and try again." "Red"
     exit 1
@@ -358,7 +369,6 @@ $TelemetryTasks = @(
     @{Path = "\Microsoft\Windows\Application Experience\"; Name = "AitAgent"}
     @{Path = "\Microsoft\Windows\Autochk\"; Name = "Proxy"}
     @{Path = "\Microsoft\Windows\PI\"; Name = "Sqm-Tasks"}
-    @{Path = "\Microsoft\Windows\Feedback\Siuf\"; Name = "DmClientOnScenarioDownload"}
     @{Path = "\Microsoft\Windows\Clip\"; Name = "License Validation"}
 )
 foreach ($t in $TelemetryTasks) {
@@ -648,9 +658,7 @@ if (-not $gpus) {
             #    -s (silent) -clean (clean install) -noreboot directly.
             $nvExe = Join-Path $env:TEMP "nvidia-$($info.Version)-driver.exe"
             Write-Log "    Downloading $($info.DownloadURL) ..."
-            $oldPP = $ProgressPreference; $ProgressPreference = "SilentlyContinue"
-            Invoke-WebRequest -Uri $info.DownloadURL -OutFile $nvExe -UseBasicParsing -TimeoutSec 1800
-            $ProgressPreference = $oldPP
+            Get-File -Uri $info.DownloadURL -OutFile $nvExe -TimeoutSec 1800
             Write-Log "    Installing NVIDIA driver silently (-s -clean -noreboot)..."
             $p = Start-Process -FilePath $nvExe -ArgumentList "-s","-clean","-noreboot" -Wait -PassThru
             Write-Log "    NVIDIA driver installer exit code: $($p.ExitCode) (a reboot may be needed to fully apply)."
@@ -680,9 +688,7 @@ if (-not $gpus) {
             # (latest known good as of 2026-07: 26.7.1).
             $amdUrl = "https://drivers.amd.com/drivers/installer/26.7/whql/amd-software-adrenalin-edition-26.7.1-minimalsetup-260724_web.exe"
             $amdExe = Join-Path $env:TEMP "amd-adrenalin-web-setup.exe"
-            $oldPP = $ProgressPreference; $ProgressPreference = "SilentlyContinue"
-            Invoke-WebRequest -Uri $amdUrl -OutFile $amdExe -UseBasicParsing -TimeoutSec 600
-            $ProgressPreference = $oldPP
+            Get-File -Uri $amdUrl -OutFile $amdExe -TimeoutSec 600
 
             # -INSTALL = unattended install (the web setup fetches the full
             # package first, so give it a generous cap and don't block forever).
@@ -781,9 +787,7 @@ if (-not (Test-Path $steamExe)) {
             Write-Log "  winget didn't land Steam — downloading the official Steam installer..."
             $installerPath = Join-Path $env:TEMP "SteamSetup.exe"
             try {
-                $oldPP = $ProgressPreference; $ProgressPreference = "SilentlyContinue"
-                Invoke-WebRequest -Uri "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe" -OutFile $installerPath -UseBasicParsing
-                $ProgressPreference = $oldPP
+                Get-File -Uri "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe" -OutFile $installerPath
                 Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
             } catch {
                 Write-Log "  Steam direct download failed (non-fatal): $_" "Yellow"
@@ -953,9 +957,7 @@ if (-not (Test-HeliumInstalled)) {
             if (-not $asset) { throw "No Windows installer asset in the latest Helium release." }
             $heliumExe = Join-Path $env:TEMP $asset.name
             Write-Log "    Downloading $($asset.browser_download_url) ..."
-            $oldPP = $ProgressPreference; $ProgressPreference = "SilentlyContinue"
-            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $heliumExe -UseBasicParsing -TimeoutSec 600
-            $ProgressPreference = $oldPP
+            Get-File -Uri $asset.browser_download_url -OutFile $heliumExe -TimeoutSec 600
             Write-Log "    Installing Helium silently (/S)..."
             Start-Process -FilePath $heliumExe -ArgumentList "/S" -Wait
         } catch {
@@ -1106,7 +1108,14 @@ Write-Log "=== Launching Steam Big Picture ==="
 try {
     $steamExeFinal = "${env:ProgramFiles(x86)}\Steam\steam.exe"
     if (Test-Path $steamExeFinal) {
-        Start-Process -FilePath $steamExeFinal -ArgumentList "-bigpicture" -ErrorAction SilentlyContinue
+        # Cold start goes straight to Big Picture via -bigpicture; if the Steam
+        # installer already left a client running, switch it with the URL instead
+        # (-bigpicture would only focus the existing window).
+        if (Get-Process -Name steam -ErrorAction SilentlyContinue) {
+            Start-Process -FilePath $steamExeFinal -ArgumentList "-start","steam://open/bigpicture" -ErrorAction SilentlyContinue
+        } else {
+            Start-Process -FilePath $steamExeFinal -ArgumentList "-bigpicture" -ErrorAction SilentlyContinue
+        }
         Write-Log "  Launched Big Picture; holding the loader until steamwebhelper appears."
         $waited = 0
         while ($waited -lt 90 -and -not (Get-Process -Name steamwebhelper -ErrorAction SilentlyContinue)) {
