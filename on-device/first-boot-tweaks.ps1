@@ -186,11 +186,16 @@ Write-Log "==== first-boot-tweaks.ps1 starting ===="
 # 0. BOOT LOADER — cover the desktop with the animated "GAMING" splash NOW
 # ═══════════════════════════════════════════════════════════════════════════
 # First boot does a lot of visible work (driver + Steam + app installs) on a
-# freshly-painted desktop. Launch the fullscreen spinning-"GAMING" loader
-# immediately (a separate process, so our blocking installs below don't freeze
-# it) and drive its status line via Set-BootStatus / the section headers in
-# Write-Log. It's dismissed at the very end, right after Big Picture paints.
-# Entirely non-fatal: if the loader can't start, first boot just runs on the
+# freshly-painted desktop. The GAMING splash must cover it the whole time.
+#
+# To kill the desktop flash at the very start, the answer file launches the
+# loader as its OWN FirstLogonCommand (Order 1) — a fast, tiny command — BEFORE
+# this heavier script (Order 2) even starts, so the splash is already up. So the
+# first thing to do here is ADOPT that already-running loader (grab its process
+# handle so we can drive its status file and close it at the end) rather than
+# launch a second splash on top of it. If for any reason no loader is running
+# (older answer file, it failed to start), fall back to launching one now.
+# Entirely non-fatal: if there's no loader at all, first boot just runs on the
 # visible desktop as before.
 $GameModeDir = Join-Path $env:ProgramData "GameMode"
 New-Item -ItemType Directory -Path $GameModeDir -Force -ErrorAction SilentlyContinue | Out-Null
@@ -198,20 +203,36 @@ $script:BootStatusFile = Join-Path $GameModeDir "boot-status.txt"
 Set-BootStatus "Preparing Game Mode..."
 $loaderProc = $null
 try {
-    $srcLoader    = "C:\Windows\Setup\Scripts\Show-BootLoader.ps1"
-    $LoaderScript = Join-Path $GameModeDir "Show-BootLoader.ps1"
-    if (Test-Path $srcLoader) { Copy-Item -Path $srcLoader -Destination $LoaderScript -Force }
-    if (Test-Path $LoaderScript) {
-        $loaderProc = Start-Process powershell.exe -PassThru -ArgumentList @(
-            "-NoLogo","-NoProfile","-WindowStyle","Hidden","-ExecutionPolicy","Bypass",
-            "-File","`"$LoaderScript`"","-StatusFile","`"$script:BootStatusFile`""
-        )
-        Write-Log "Boot loader launched (PID $($loaderProc.Id)) — desktop is covered for first boot."
-    } else {
-        Write-Log "Show-BootLoader.ps1 not found in Setup\Scripts — continuing without the fullscreen splash (non-fatal)." "Yellow"
+    # Adopt the loader the answer file's Order-1 command already started.
+    $existing = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like "*Show-BootLoader.ps1*" } | Select-Object -First 1
+    if ($existing) {
+        $loaderProc = Get-Process -Id $existing.ProcessId -ErrorAction SilentlyContinue
+        Write-Log "Adopted the already-running boot loader (PID $($existing.ProcessId)) — desktop was covered from the first frame."
+    }
+    if (-not $loaderProc) {
+        # Fallback: no loader running yet — start one from the copy in ProgramData.
+        $srcLoader    = "C:\Windows\Setup\Scripts\Show-BootLoader.ps1"
+        $LoaderScript = Join-Path $GameModeDir "Show-BootLoader.ps1"
+        if (Test-Path $srcLoader) { Copy-Item -Path $srcLoader -Destination $LoaderScript -Force }
+        if (Test-Path $LoaderScript) {
+            $loaderProc = Start-Process powershell.exe -PassThru -ArgumentList @(
+                "-NoLogo","-NoProfile","-WindowStyle","Hidden","-ExecutionPolicy","Bypass",
+                "-File","`"$LoaderScript`"","-StatusFile","`"$script:BootStatusFile`""
+            )
+            Write-Log "Boot loader launched (PID $($loaderProc.Id)) — desktop is covered for first boot."
+        } else {
+            Write-Log "Show-BootLoader.ps1 not found in Setup\Scripts — continuing without the fullscreen splash (non-fatal)." "Yellow"
+        }
+    }
+    # Keep a ProgramData copy regardless (Start-GameMode.ps1 loads it from there
+    # for every subsequent login).
+    $srcLoaderCopy = "C:\Windows\Setup\Scripts\Show-BootLoader.ps1"
+    if (Test-Path $srcLoaderCopy) {
+        Copy-Item -Path $srcLoaderCopy -Destination (Join-Path $GameModeDir "Show-BootLoader.ps1") -Force -ErrorAction SilentlyContinue
     }
 } catch {
-    Write-Log "Could not start the boot loader (non-fatal, first boot runs on the visible desktop): $_" "Yellow"
+    Write-Log "Could not set up the boot loader (non-fatal, first boot runs on the visible desktop): $_" "Yellow"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -639,29 +660,51 @@ if (-not $gpus) {
         }
     }
 
-    # ── AMD — no headless/silent path exists ──────────────────────────────────
+    # ── AMD — silent install via the installer's -INSTALL switch ──────────────
     # AMD's consumer Adrenalin driver isn't in winget (only the wrong
-    # 'AMD Software: Cloud Edition' enterprise SKU is), and the auto-detect
-    # installer can't do an unattended driver install. Rather than pop a GUI
-    # behind Steam Big Picture at first login, download AMD's official
-    # auto-detect installer to the Public Desktop and leave a one-click
-    # instruction. Honest limit: AMD is the one vendor this can't fully automate.
+    # 'AMD Software: Cloud Edition' enterprise SKU is). The auto-detect tool has
+    # no unattended path, but the full/minimal SETUP package DOES: the Radeon
+    # Software Command Line Installation guide documents `-INSTALL`, which
+    # installs silently (no GUI, no output). So instead of just staging a GUI
+    # installer for the user to run (the old behaviour — which meant AMD boxes
+    # got NO driver, and therefore no HDMI/DisplayPort audio either), download
+    # the web setup and run it with -INSTALL. If that doesn't take, the same
+    # installer is left on the desktop as a manual fallback.
     if ($script:HaveNetwork -and $vendors.ContainsKey("AMD")) {
-        Write-Log "  [AMD] $($vendors['AMD']) — no unattended install path; staging AMD's auto-detect installer."
+        Write-Log "  [AMD] $($vendors['AMD']) — downloading AMD Software: Adrenalin Edition and installing silently."
         try {
             # NOTE: AMD has no stable version-less installer URL, so this is a
             # pinned Adrenalin web-setup link and WILL age out over time. That's
             # intentionally harmless: if it 404s, the catch below just logs the
-            # amd.com/support link instead. Bump the version when refreshing.
-            $amdUrl = "https://drivers.amd.com/drivers/installer/24.10/whql/amd-software-adrenalin-edition-24.10.1-minimalsetup-241001_web.exe"
-            $amdDir = Join-Path $env:PUBLIC "Desktop"
-            $amdExe = Join-Path $amdDir "Install AMD Graphics Driver.exe"
+            # amd.com/support link instead. Bump the version when refreshing
+            # (latest known good as of 2026-07: 26.7.1).
+            $amdUrl = "https://drivers.amd.com/drivers/installer/26.7/whql/amd-software-adrenalin-edition-26.7.1-minimalsetup-260724_web.exe"
+            $amdExe = Join-Path $env:TEMP "amd-adrenalin-web-setup.exe"
             $oldPP = $ProgressPreference; $ProgressPreference = "SilentlyContinue"
             Invoke-WebRequest -Uri $amdUrl -OutFile $amdExe -UseBasicParsing -TimeoutSec 600
             $ProgressPreference = $oldPP
-            Write-Log "    Staged AMD installer on the desktop: '$amdExe'. Run it once to fetch + install the latest Adrenalin driver." "Cyan"
+
+            # -INSTALL = unattended install (the web setup fetches the full
+            # package first, so give it a generous cap and don't block forever).
+            Write-Log "    Installing AMD driver silently (-INSTALL) — the web setup downloads the full package first, this can take several minutes."
+            $p = Start-Process -FilePath $amdExe -ArgumentList "-INSTALL" -PassThru
+            if ($p.WaitForExit(1500000)) {   # up to 25 min
+                Write-Log "    AMD installer exit code: $($p.ExitCode) (a reboot may be needed to fully apply)."
+            } else {
+                Write-Log "    AMD silent install exceeded 25 min — killing it; the installer is left on the desktop to finish manually." "Yellow"
+                try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+            }
+
+            # Fallback safety net: drop the same installer on the Public Desktop
+            # so it can be run by hand if the silent install didn't land (e.g. a
+            # card that needs a reboot mid-install).
+            try {
+                $amdDesktop = Join-Path (Join-Path $env:PUBLIC "Desktop") "Install AMD Graphics Driver.exe"
+                Copy-Item -Path $amdExe -Destination $amdDesktop -Force -ErrorAction SilentlyContinue
+                Write-Log "    Left a copy on the desktop ('Install AMD Graphics Driver.exe') in case a manual run is needed." "Cyan"
+            } catch {}
         } catch {
-            Write-Log "    [AMD] Could not stage the AMD installer (non-fatal): $_" "Yellow"
+            Write-Log "    [AMD] Auto driver install failed (non-fatal): $_" "Yellow"
             Write-Log "    Get the latest Adrenalin driver from https://www.amd.com/en/support" "Cyan"
         }
     }
@@ -698,6 +741,33 @@ foreach ($svc in @("WinDefend", "WdNisSvc", "SecurityHealthService", "wscsvc")) 
 Get-ScheduledTask -TaskPath "\Microsoft\Windows\Windows Defender\" -ErrorAction SilentlyContinue |
     Enable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
 Write-Log "  Confirmed Windows Defender scheduled tasks are enabled."
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 4b. AUDIO — safety net (make sure the sound stack is actually running)
+# ═══════════════════════════════════════════════════════════════════════════
+# "No sound" on a minimal build has two usual causes, both handled here/nearby:
+#   1. HDMI / DisplayPort audio comes from the GPU driver. On an AMD box that
+#      driver never installed before (it was only staged on the desktop) — the
+#      -INSTALL fix in the GPU-driver step above is what restores those audio
+#      endpoints. Nothing to do here for that beyond installing the driver.
+#   2. The core audio SERVICES not running. This build never disables them, but
+#      assert them anyway (Automatic + started) as cheap insurance — a machine
+#      with a working audio driver but a stopped Audiosrv/AudioEndpointBuilder
+#      shows exactly the same "no audio devices" symptom. RpcSs is their
+#      dependency, so confirm it too (it's Automatic by default; never disable).
+# If, after this and the GPU driver, analog/onboard output is still silent, the
+# motherboard's audio codec needs its vendor driver (Realtek/etc.) — this build
+# fetches GPU drivers only, and with Windows Update disabled that codec driver
+# won't arrive on its own; install it from the board maker's site.
+Write-Log "=== Audio services (safety net) ==="
+foreach ($svc in @("RpcSs", "AudioEndpointBuilder", "Audiosrv")) {
+    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($s) {
+        Set-Service -Name $svc -StartupType Automatic -ErrorAction SilentlyContinue
+        if ($s.Status -ne "Running") { Start-Service -Name $svc -ErrorAction SilentlyContinue }
+        Write-Log "  Confirmed $svc = Automatic (started)."
+    }
+}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 5. STEAM — install + Big Picture autostart
@@ -778,22 +848,55 @@ if (Test-Path $steamExe) {
             throw "Start-GameMode.ps1 missing"
         }
 
-        # A tiny .cmd wrapper launches the (hidden) launcher — used by both the
-        # Startup item and the "Game Mode" desktop shortcut for re-entry.
+        # A tiny .cmd wrapper launches the (hidden) launcher — used by the
+        # "Game Mode" desktop shortcut for manual re-entry (and by the Startup
+        # shortcut only if the scheduled task below can't be registered).
         $EnterGameModeScript = Join-Path $GameModeDir "Enter-GameMode.cmd"
         @"
 @echo off
 start "" powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$LauncherScript"
 "@ | Set-Content -Path $EnterGameModeScript -Encoding ASCII
 
-        # Startup-folder shortcut = boots straight into Big Picture every login.
+        # ── FAST LOGIN LAUNCH — an AtLogOn scheduled task, not a Startup shortcut ──
+        # The user's ask: every boot AFTER the first should reach Steam as fast as
+        # possible. A logon TASK fires the launcher the instant the session
+        # starts — earlier than the shell gets around to processing the Startup
+        # folder — so Steam begins loading in parallel with the desktop painting
+        # and Big Picture is up sooner. It runs in the interactive session
+        # (LogonType Interactive) so the splash + Big Picture have a desktop; no
+        # elevation is needed (Steam/the splash don't require it). Falls back to a
+        # Startup-folder shortcut if the task can't be registered, so autostart
+        # never silently disappears.
         $StartupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
         New-Item -ItemType Directory -Path $StartupDir -Force -ErrorAction SilentlyContinue | Out-Null
+        $StartupLnk = Join-Path $StartupDir "Game Mode.lnk"
+        $taskUser = "$env:USERDOMAIN\$env:USERNAME"
+        $taskOk = $false
+        try {
+            $taskAction   = New-ScheduledTaskAction -Execute "powershell.exe" `
+                -Argument "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$LauncherScript`""
+            $taskTrigger  = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
+            $taskPrincipal= New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
+            $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable
+            Register-ScheduledTask -TaskName "GameMode-Login" -Action $taskAction -Trigger $taskTrigger `
+                -Principal $taskPrincipal -Settings $taskSettings -Force -ErrorAction Stop | Out-Null
+            $taskOk = $true
+            # Task owns the launch now — drop any legacy Startup shortcut so Steam
+            # isn't launched twice (double splash) on machines upgraded from an
+            # older build.
+            Remove-Item $StartupLnk -Force -ErrorAction SilentlyContinue
+            Write-Log "  Registered AtLogOn task 'GameMode-Login' for fast Big Picture launch on every login."
+        } catch {
+            Write-Log "  Could not register the logon task ($_) — falling back to a Startup-folder shortcut." "Yellow"
+        }
+
+        # Shortcuts: the desktop one is always created (manual re-entry); the
+        # Startup one only as the task's fallback.
         $shell = New-Object -ComObject WScript.Shell
-        foreach ($lnkTarget in @(
-            @{ Path = Join-Path $StartupDir "Game Mode.lnk";                 Desc = "Launch Steam Big Picture at login" },
-            @{ Path = Join-Path (Join-Path $env:PUBLIC "Desktop") "Game Mode.lnk"; Desc = "Return to Game Mode (Steam Big Picture)" }
-        )) {
+        $lnkTargets = @(@{ Path = Join-Path (Join-Path $env:PUBLIC "Desktop") "Game Mode.lnk"; Desc = "Return to Game Mode (Steam Big Picture)" })
+        if (-not $taskOk) { $lnkTargets += @{ Path = $StartupLnk; Desc = "Launch Steam Big Picture at login" } }
+        foreach ($lnkTarget in $lnkTargets) {
             $shortcut = $shell.CreateShortcut($lnkTarget.Path)
             $shortcut.TargetPath = $EnterGameModeScript
             $shortcut.WorkingDirectory = Split-Path $steamExe
@@ -802,7 +905,7 @@ start "" powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy 
             $shortcut.Description = $lnkTarget.Desc
             $shortcut.Save()
         }
-        Write-Log "  Set up Big Picture autostart (Startup shortcut) + 'Game Mode' desktop shortcut for re-entry. explorer.exe remains the shell."
+        Write-Log "  Set up Big Picture autostart + 'Game Mode' desktop shortcut for re-entry. explorer.exe remains the shell."
     } catch {
         Write-Log "  Failed to set up Game Mode autostart (non-fatal — explorer.exe is the shell, launch Steam manually): $_" "Red"
     }
@@ -1003,7 +1106,7 @@ Write-Log "=== Launching Steam Big Picture ==="
 try {
     $steamExeFinal = "${env:ProgramFiles(x86)}\Steam\steam.exe"
     if (Test-Path $steamExeFinal) {
-        Start-Process -FilePath $steamExeFinal -ArgumentList "-start steam://open/bigpicture" -ErrorAction SilentlyContinue
+        Start-Process -FilePath $steamExeFinal -ArgumentList "-bigpicture" -ErrorAction SilentlyContinue
         Write-Log "  Launched Big Picture; holding the loader until steamwebhelper appears."
         $waited = 0
         while ($waited -lt 90 -and -not (Get-Process -Name steamwebhelper -ErrorAction SilentlyContinue)) {

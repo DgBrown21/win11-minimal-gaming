@@ -144,7 +144,7 @@ Dismount-DiskImage -ImagePath $isoPath
 # standalone against an already-extracted folder while iterating, without
 # re-downloading/re-extracting the ~8.5GB source ISO every time.
 Write-Host "==> Slimming install.wim (this is the slow part — see slim-image.ps1, expect 1-2+ hours)..."
-& (Join-Path $ScriptDir "slim-image.ps1") -ExtractDir $extractDir
+& (Join-Path $ScriptDir "build-time\slim-image.ps1") -ExtractDir $extractDir
 if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
     throw "slim-image.ps1 failed (exit $LASTEXITCODE) — check the output above before continuing."
 }
@@ -154,9 +154,9 @@ Write-Host "==> Injecting autounattend.xml and `$OEM`$ first-boot script..."
 Copy-Item (Join-Path $ScriptDir "autounattend.xml") (Join-Path $extractDir "autounattend.xml") -Force
 $oemScripts = Join-Path $extractDir "sources\`$OEM`$\`$`$\Setup\Scripts"
 New-Item -ItemType Directory -Path $oemScripts -Force | Out-Null
-Copy-Item (Join-Path $ScriptDir "first-boot-tweaks.ps1") $oemScripts -Force
-Copy-Item (Join-Path $ScriptDir "Start-GameMode.ps1") $oemScripts -Force
-Copy-Item (Join-Path $ScriptDir "Show-BootLoader.ps1") $oemScripts -Force
+Copy-Item (Join-Path $ScriptDir "on-device\first-boot-tweaks.ps1") $oemScripts -Force
+Copy-Item (Join-Path $ScriptDir "on-device\Start-GameMode.ps1") $oemScripts -Force
+Copy-Item (Join-Path $ScriptDir "on-device\Show-BootLoader.ps1") $oemScripts -Force
 
 # ── 5. Rebuild with oscdimg ───────────────────────────────────────────────
 # -m: ignore the (irrelevant here) max-image-size limit

@@ -125,7 +125,10 @@ if (-not $loaderProc) {
 $steamExe = "${env:ProgramFiles(x86)}\Steam\steam.exe"
 try {
     if (Test-Path $steamExe) {
-        Start-Process -FilePath $steamExe -ArgumentList "-start steam://open/bigpicture"
+        # -bigpicture boots Steam STRAIGHT into Big Picture on a cold start,
+        # faster than opening the normal client and then navigating to Big
+        # Picture through the steam:// protocol handler.
+        Start-Process -FilePath $steamExe -ArgumentList "-bigpicture"
         Write-Log "Launched Steam Big Picture"
     } else {
         Write-Log "Steam not found at $steamExe - dropping to desktop"

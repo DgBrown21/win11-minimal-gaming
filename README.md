@@ -59,31 +59,53 @@ different reliability characteristics:
   working at that point (expected, not a bug).
 - **Steam, boots straight into Big Picture — explorer stays the real shell.**
   `first-boot-tweaks.ps1` installs Steam (winget, falling back to the official
-  installer), then sets up `Start-GameMode.ps1` as a **per-user Startup item**
-  that launches Big Picture on top of the normal desktop behind a black boot
-  splash. `explorer.exe` remains the registered `Winlogon\Shell`, so Windows
-  starts the desktop (wallpaper + taskbar) the normal, fully-painted way.
-  Combined with autologon, the machine goes power-on straight to Steam Big
-  Picture, SteamOS/Deck-style; Big Picture's "Exit to Desktop" drops to a
-  real, working desktop (no black screen), and a **"Game Mode" desktop icon**
-  jumps back into Big Picture at any time. This holds on the **very first boot
-  too** — `first-boot-tweaks.ps1` launches Big Picture itself at the end of its
-  run (the Startup shortcut alone only kicks in from the second login), so
-  there's no one-time "lands on the bare desktop" first boot.
+  installer), then wires up `Start-GameMode.ps1` to launch Big Picture on top of
+  the normal desktop behind the GAMING splash. `explorer.exe` remains the
+  registered `Winlogon\Shell`, so Windows starts the desktop (wallpaper +
+  taskbar) the normal, fully-painted way. Combined with autologon, the machine
+  goes power-on straight to Steam Big Picture, SteamOS/Deck-style; Big Picture's
+  "Exit to Desktop" drops to a real, working desktop (no black screen), and a
+  **"Game Mode" desktop icon** jumps back into Big Picture at any time.
+- **Fast into Steam on every boot after the first.** The per-login launch is an
+  **AtLogOn scheduled task** (`GameMode-Login`), not a Startup-folder shortcut —
+  a logon task fires the instant the session begins, earlier than the shell
+  processes the Startup folder, so Steam starts loading in parallel with the
+  desktop painting. Steam is launched with **`-bigpicture`**, which boots
+  straight into Big Picture on a cold start rather than opening the normal
+  client and then navigating there. (If the task can't be registered for any
+  reason it falls back to a Startup-folder shortcut, so autostart never silently
+  disappears.) The **first** boot still ends in Big Picture too —
+  `first-boot-tweaks.ps1` launches it itself at the end of its run, since the
+  logon task only starts firing from the second login onward — so there's no
+  one-time "lands on the bare desktop" first boot.
 
-- **Fullscreen "GAMING" boot loader.** A black, topmost splash with a big
-  GAMING logo, a progress ring with a light spinning around it, and a live
-  status line covers the desktop during the whole first-boot install phase
-  (drivers, Steam, apps) and during the brief pre-Big-Picture moment on every
-  login — so setup never shows as a visible Windows desktop doing work.
-  explorer.exe still stays the real shell underneath (`Show-BootLoader.ps1`).
+- **Fullscreen "GAMING" boot loader with a moving starfield.** A black, topmost
+  splash with a big GAMING logo, a progress ring with a light spinning around
+  it, and a live status line covers the desktop during the whole first-boot
+  install phase (drivers, Steam, apps) and during the brief pre-Big-Picture
+  moment on every login — so setup never shows as a visible Windows desktop
+  doing work. Behind the logo, a 3D **starfield** streams out of the centre of
+  the screen toward you (random star sizes and positions, each recycled at the
+  far plane as it passes): because the stars are perspective-projected, the ones
+  near the centre drift slowly and the ones out toward the edges race past —
+  the classic warp look. To make sure the desktop never flashes at first boot,
+  the answer file now launches this splash as its *own* first-logon command
+  before the setup script runs, and the setup script adopts that already-running
+  splash rather than starting a second one; the loader also re-asserts topmost
+  every half-second so nothing slips in front of it. explorer.exe still stays
+  the real shell underneath (`on-device/Show-BootLoader.ps1`).
 
 - **Latest GPU drivers on install.** Because Windows Update is disabled, the
   GPU driver is fetched straight from the vendor at first boot: NVIDIA's newest
   Game Ready Driver (resolved via NVIDIA's public lookup API and silent-
-  installed), Intel's official Driver & Support Assistant (winget), and — since
-  AMD has no unattended path — AMD's auto-detect installer staged on the
-  desktop. Vendor is detected live; every branch is best-effort and non-fatal.
+  installed), Intel's official Driver & Support Assistant (winget), and AMD's
+  Adrenalin Edition **silent-installed via the installer's `-INSTALL` switch**
+  (the documented unattended path — the web setup downloads the full package
+  then installs it with no GUI), with the same installer also left on the
+  desktop as a manual fallback. Vendor is detected live; every branch is
+  best-effort and non-fatal. **This also fixes HDMI/DisplayPort audio on AMD
+  boxes** — those audio endpoints come from the GPU driver, so with no driver
+  there was no sound over the display cable.
 
   This deliberately does **not** replace the shell. An earlier version of this
   project made powershell the `Winlogon\Shell` and hand-launched explorer;
@@ -203,16 +225,36 @@ boot/PnP subsystem.
 
 ---
 
-## Files
+## Project layout
+
+Files are grouped by **when they run**, so the tree reads top-to-bottom in the
+order things happen — build the ISO at the root, servicing happens at build
+time, the rest runs on the installed PC:
+
+```
+win11-minimal-gaming/
+├─ build-windows.ps1      ← run this (elevated) to build the ISO
+├─ autounattend.xml       ← unattended answer file, injected at build time
+├─ build-time/
+│  └─ slim-image.ps1      ← offline DISM servicing, during the build only
+└─ on-device/             ← copied into the ISO, run on the installed machine
+   ├─ first-boot-tweaks.ps1   ← once, at first login
+   ├─ Start-GameMode.ps1      ← every login: launch Steam Big Picture
+   └─ Show-BootLoader.ps1     ← the GAMING splash + starfield
+```
+
+(`build/` is scratch space the build creates and cleans up; `local/` — if
+present — holds machine-specific one-off helpers that aren't part of the build.
+Both are git-ignored.)
 
 | File | Purpose |
 |---|---|
-| `build-windows.ps1` | Fetches the official Microsoft ISO, extracts it, runs `slim-image.ps1`, injects the answer file + first-boot script, rebuilds with `oscdimg`. |
-| `slim-image.ps1` | The core size-reduction work — offline DISM servicing against `install.wim`. Can be re-run standalone against an already-extracted `build\extracted` folder while iterating, without re-downloading the source ISO. |
-| `autounattend.xml` | The unattended answer file. |
-| `first-boot-tweaks.ps1` | OneDrive removal + Edge runtime guard, Windows Update disable, telemetry-off/privacy pass, footprint service disables, performance power plan, Defender safety net, **latest GPU driver fetch** (vendors direct, since WU is off), Steam install + Big Picture autostart, and the fullscreen boot loader that covers the desktop during it all — runs once at first login. |
-| `Start-GameMode.ps1` | Per-user Startup launcher: shows the animated loader and launches Steam Big Picture on top of the normal desktop (explorer.exe stays the shell). Staged onto the ISO by `build-windows.ps1`, wired up by `first-boot-tweaks.ps1`. |
-| `Show-BootLoader.ps1` | The fullscreen "GAMING" boot loader — a black topmost splash with a big logo, a progress ring with a spinning light, and a live status line (what's loading/installing). Driven by a status file so it animates smoothly while the caller does blocking installs. Used by both first boot and every login. |
+| `build-windows.ps1` | Fetches the official Microsoft ISO, extracts it, runs `build-time/slim-image.ps1`, injects the answer file + the `on-device/` scripts, rebuilds with `oscdimg`. **The one command you run.** |
+| `autounattend.xml` | The unattended answer file. Order 1 puts the GAMING splash up; Order 2 runs `first-boot-tweaks.ps1`. |
+| `build-time/slim-image.ps1` | The core size-reduction work — offline DISM servicing against `install.wim`. Can be re-run standalone against an already-extracted `build\extracted` folder while iterating, without re-downloading the source ISO. |
+| `on-device/first-boot-tweaks.ps1` | OneDrive removal + Edge runtime guard, Windows Update disable, telemetry-off/privacy pass, footprint service disables, performance power plan, Defender + **audio** safety nets, **latest GPU driver install** (vendors direct, since WU is off — AMD now silent-installs), Steam install + Big Picture autostart, and adopting the boot loader that covers the desktop during it all — runs once at first login. |
+| `on-device/Start-GameMode.ps1` | Per-login launcher (fired by the `GameMode-Login` AtLogOn scheduled task): shows the animated loader and launches Steam straight into Big Picture (`-bigpicture`) on top of the normal desktop (explorer.exe stays the shell). Staged onto the ISO by `build-windows.ps1`, wired up by `first-boot-tweaks.ps1`. |
+| `on-device/Show-BootLoader.ps1` | The fullscreen "GAMING" boot loader — a black topmost splash with the moving starfield, a big logo, a progress ring with a spinning light, and a live status line (what's loading/installing). Driven by a status file so it animates smoothly while the caller does blocking installs. Used by both first boot and every login. |
 | `Win11-Minimal.iso` | **Not in this repo** — build artifact, see `.gitignore`. Build it yourself; redistributing Microsoft's install media isn't something this repo does. |
 
 ## Requirements to build
@@ -251,9 +293,8 @@ included).
 Because `explorer.exe` stays the real shell, there's no black-desktop failure
 mode to recover from here — if Big Picture ever fails to launch, you're simply
 left on the normal desktop and can start Steam manually. To stop the
-boot-into-Big-Picture behaviour entirely, delete the **"Game Mode"** shortcut
-from the Startup folder:
-```
-%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Game Mode.lnk
-```
+boot-into-Big-Picture behaviour entirely, delete the **`GameMode-Login`**
+scheduled task (Task Scheduler, or `Unregister-ScheduledTask -TaskName
+GameMode-Login`); on a machine that fell back to the Startup shortcut instead,
+delete `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Game Mode.lnk`.
 The desktop **"Game Mode"** icon re-enters Big Picture on demand at any time.

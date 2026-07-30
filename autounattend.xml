@@ -192,9 +192,24 @@
            media at sources\$OEM$\$$\Setup\Scripts\, which Windows Setup
            copies to C:\Windows\Setup\Scripts\ automatically — see
            build-windows.ps1 for how that folder is laid out. -->
+      <!--
+        Order 1 puts the fullscreen "GAMING" splash up FIRST, as its own quick
+        fire-and-forget command (cmd's `start` launches it detached and returns
+        immediately), so the loader is already covering the screen before the
+        heavier first-boot script in Order 2 begins. This is what stops the bare
+        desktop from flashing at first boot — Order 2's script then ADOPTS this
+        running loader (see first-boot-tweaks.ps1 STEP 0) instead of starting a
+        second one, drives its status line, and closes it once Big Picture has
+        painted. Non-fatal: if the splash can't start, Order 2 still runs.
+      -->
       <FirstLogonCommands>
         <SynchronousCommand wcm:action="add">
           <Order>1</Order>
+          <RequiresUserInput>false</RequiresUserInput>
+          <CommandLine>cmd /c start "" /min powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Windows\Setup\Scripts\Show-BootLoader.ps1" -StatusFile "C:\ProgramData\GameMode\boot-status.txt"</CommandLine>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>2</Order>
           <RequiresUserInput>false</RequiresUserInput>
           <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Windows\Setup\Scripts\first-boot-tweaks.ps1"</CommandLine>
         </SynchronousCommand>

@@ -21,3 +21,8 @@ vm/
 # Nextcloud. The repo ships build-windows.ps1 as the portable build entry point.
 build-all.ps1
 upload-to-nextcloud.ps1
+
+# local/ holds machine-specific one-off helpers that aren't part of the build
+# (e.g. _steam-drives.ps1 — reformats/labels one particular machine's Steam
+# drives by hardware id). Kept out of the portable repo.
+local/
