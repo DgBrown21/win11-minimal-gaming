@@ -1048,7 +1048,7 @@ if (Test-HeliumInstalled) {
 #   (Helium, the default browser, is installed separately in 5b-0 with a
 #    direct-download fallback — it's the machine's only browser, so it can't
 #    be left to this best-effort loop.)
-#   - Files (file manager)     Files-Community.Files (set as default — see 5c)
+#   - Files (file manager)     FilesCommunity.Files  (set as default — see 5c)
 #   - Git for Windows          Git.Git           (REQUIRED by Claude Code — it
 #                                                  shells out to Git Bash)
 #   - Claude Code (AI CLI)     Anthropic.ClaudeCode
@@ -1060,7 +1060,7 @@ if (-not $script:WingetExe) {
     Write-Log "  No network — skipping the extra winget apps." "Red"
 } else {
     Install-WingetApp -Id "Google.Chrome"         -Name "Google Chrome"           | Out-Null
-    Install-WingetApp -Id "Files-Community.Files" -Name "Files (file manager)"     | Out-Null
+    Install-WingetApp -Id "FilesCommunity.Files"  -Name "Files (file manager)"     | Out-Null
     Install-WingetApp -Id "Git.Git"               -Name "Git for Windows (Claude Code prerequisite)" | Out-Null
     Install-WingetApp -Id "Anthropic.ClaudeCode"  -Name "Claude Code"             | Out-Null
     Install-WingetApp -Id "SST.opencode"          -Name "opencode"               | Out-Null
@@ -1120,24 +1120,40 @@ try {
 # Explorer still exists underneath. If this ever misbehaves, Files' own
 # Settings > "Set as default file manager" toggle is the guaranteed fallback.
 try {
-    $filesAlias = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WindowsApps" -Filter "files.exe" -ErrorAction SilentlyContinue |
-        Select-Object -First 1
+    # The Files "stable" channel installs an app-execution alias named
+    # files-stable.exe (preview → files-preview.exe); there is no bare files.exe.
+    # This alias path is stable across app updates, unlike the versioned
+    # C:\Program Files\WindowsApps\Files_<ver>__... folder, so target the alias.
+    $appsDir = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+    $filesAlias = Get-ChildItem $appsDir -Filter "files-stable.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $filesAlias) {
-        $filesAlias = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WindowsApps" -Filter "*files*.exe" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+        $filesAlias = Get-ChildItem $appsDir -Filter "*files*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
     }
     if (-not $filesAlias) {
         Write-Log "  Files launcher alias not found in WindowsApps — skipping default-file-manager step." "Yellow"
     } else {
-        $cmd = "`"$($filesAlias.FullName)`" `"%1`""
-        foreach ($cls in @("Directory", "Drive")) {
-            $cmdKey = "HKCU:\Software\Classes\$cls\shell\open\command"
+        # %1 = the folder/drive path for Directory/Drive/Folder;
+        # %V is the same for the folder-window background verb.
+        # Directory  = a filesystem folder,  Drive = a volume root,
+        # Folder     = the base namespace class both derive from.
+        foreach ($map in @(
+            @{ Cls = "Directory";            Arg = "%1" },
+            @{ Cls = "Directory\Background"; Arg = "%V" },
+            @{ Cls = "Drive";                Arg = "%1" },
+            @{ Cls = "Folder";               Arg = "%1" }
+        )) {
+            $cmdKey = "HKCU:\Software\Classes\$($map.Cls)\shell\open\command"
             New-Item -Path $cmdKey -Force -ErrorAction SilentlyContinue | Out-Null
-            Set-ItemProperty -Path $cmdKey -Name "(default)" -Value $cmd -ErrorAction SilentlyContinue
-            # A stale DDE hook on the default verb would otherwise override the command.
-            Remove-ItemProperty -Path "HKCU:\Software\Classes\$cls\shell\open" -Name "DelegateExecute" -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $cmdKey -Name "(default)" -Value "`"$($filesAlias.FullName)`" `"$($map.Arg)`"" -ErrorAction SilentlyContinue
+            # The base image ships DelegateExecute={11dbb47c-...} on the HKLM
+            # open\command verb, which takes precedence over any command string
+            # and routes folder opens back into Explorer. Merely removing the
+            # (absent) HKCU value does nothing — the HKLM GUID still wins. We
+            # must SET an EMPTY DelegateExecute in HKCU so it shadows the HKLM
+            # GUID, letting our command string run instead.
+            Set-ItemProperty -Path $cmdKey -Name "DelegateExecute" -Value "" -ErrorAction SilentlyContinue
         }
-        Write-Log "  Set Files as the default folder handler (Directory + Drive open command)."
+        Write-Log "  Set Files as the default folder handler (Directory + Drive + Folder open command)."
     }
 } catch {
     Write-Log "  Default-file-manager step failed (non-fatal, Explorer remains): $_" "Yellow"
