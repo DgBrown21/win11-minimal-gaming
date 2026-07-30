@@ -728,6 +728,70 @@ if (-not $gpus) {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 3f. DRIVER UPDATES — non-GPU drivers now + a weekly check (WU-off-safe)
+# ═══════════════════════════════════════════════════════════════════════════
+# The GPU step above only handles the graphics driver. Everything else the
+# machine needs — chipset, NIC, Bluetooth, storage, the motherboard audio
+# codec — normally arrives through Windows Update, which section 3 turned off.
+# Update-Drivers.ps1 restores JUST the driver path (it drives the Windows
+# Update Agent COM API filtered to Type='Driver', so it never pulls a feature
+# or quality OS update) and briefly starts wuauserv only for the query, then
+# puts it back to Disabled. Two things happen here:
+#   1. Run it once now (-Auto) to install any drivers the image is missing.
+#   2. Register a WEEKLY task that scans and, if drivers are offered, pops a
+#      window letting the user choose to install (-Notify). Nothing installs
+#      automatically after first boot; the user always gets the choice.
+Write-Log "=== Driver updates (WU driver catalog, WU otherwise off) ==="
+try {
+    $DriverDir    = Join-Path $env:ProgramData "DriverUpdate"
+    New-Item -ItemType Directory -Path $DriverDir -Force | Out-Null
+    $SrcUpdater   = "C:\Windows\Setup\Scripts\Update-Drivers.ps1"
+    $DriverScript = Join-Path $DriverDir "Update-Drivers.ps1"
+    if (Test-Path $SrcUpdater) {
+        Copy-Item -Path $SrcUpdater -Destination $DriverScript -Force
+        Write-Log "  Staged Update-Drivers.ps1 to $DriverScript."
+
+        # 1. One-off unattended pass now to catch the non-GPU drivers. Only
+        #    worth attempting if the network came up earlier; otherwise the
+        #    weekly task will get to it. Non-fatal either way.
+        if ($script:HaveNetwork) {
+            Write-Log "  Running a one-off driver install pass (-Auto)..."
+            $p = Start-Process -FilePath "powershell.exe" `
+                -ArgumentList @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$DriverScript`"", "-Auto") `
+                -Wait -PassThru -WindowStyle Hidden
+            Write-Log "    Driver install pass exit code: $($p.ExitCode) (see $DriverDir\driver-update.log for detail)."
+        } else {
+            Write-Log "  No network — skipping the one-off driver pass; the weekly task will handle it." "Yellow"
+        }
+
+        # 2. Weekly check. Interactive + Highest so it can both run the COM
+        #    installer (needs admin) AND show the install window on the desktop.
+        #    -Notify stays silent unless drivers are actually offered.
+        $taskUser = "$env:USERDOMAIN\$env:USERNAME"
+        try {
+            $drvAction    = New-ScheduledTaskAction -Execute "powershell.exe" `
+                -Argument "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$DriverScript`" -Notify"
+            # RandomDelay (a TRIGGER property) spreads the run off a hard 1PM spike.
+            $drvTrigger   = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 1:00PM -RandomDelay ([TimeSpan]::FromMinutes(30))
+            $drvPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
+            # StartWhenAvailable makes a powered-off box catch up its missed run
+            # the next time it's on.
+            $drvSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::FromHours(2))
+            Register-ScheduledTask -TaskName "MinimalGaming-DriverCheck" -Action $drvAction -Trigger $drvTrigger `
+                -Principal $drvPrincipal -Settings $drvSettings -Force -ErrorAction Stop | Out-Null
+            Write-Log "  Registered weekly task 'MinimalGaming-DriverCheck' (Sundays ~1PM) to scan and offer driver updates."
+        } catch {
+            Write-Log "  Could not register the weekly driver-check task (non-fatal): $_" "Yellow"
+        }
+    } else {
+        Write-Log "  Update-Drivers.ps1 not found in Setup\Scripts — skipping driver-update setup." "Yellow"
+    }
+} catch {
+    Write-Log "  Driver-update setup failed (non-fatal): $_" "Yellow"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 4. SAFETY NET — confirm Windows Defender is untouched
 # ═══════════════════════════════════════════════════════════════════════════
 # Not a "change" — this only ever pushes Defender's services/tasks back to
@@ -1146,5 +1210,6 @@ Write-Log "Manual restore reminders (not scripted, no -Undo mode in this project
 Write-Log "  - Edge: https://www.microsoft.com/edge" "Cyan"
 Write-Log "  - OneDrive: https://www.microsoft.com/microsoft-365/onedrive/download" "Cyan"
 Write-Log "  - Windows Update: Settings > Windows Update, or remove the NoAutoUpdate policy value above and re-enable wuauserv/UsoSvc." "Cyan"
+Write-Log "  - Driver updates: run C:\ProgramData\DriverUpdate\Update-Drivers.ps1 (elevated) any time; the weekly 'MinimalGaming-DriverCheck' task offers them automatically. Remove that task to stop the weekly check." "Cyan"
 Write-Log "  - Autologon: remove AutoAdminLogon/DefaultUserName/DefaultDomainName from $WinlogonPath" "Cyan"
 Write-Log "Log saved to $LogFile"

@@ -107,6 +107,24 @@ different reliability characteristics:
   boxes** — those audio endpoints come from the GPU driver, so with no driver
   there was no sound over the display cable.
 
+- **All other drivers, kept current without turning Windows Update back on**
+  (`on-device/Update-Drivers.ps1`). The GPU step only covers graphics; chipset,
+  NIC, Bluetooth, storage and the motherboard audio codec normally arrive
+  through Windows Update, which this build disables. Update-Drivers.ps1 restores
+  *just* the driver path by driving the Windows Update Agent COM API with a
+  `Type='Driver'` filter — so it fetches hardware drivers **only**, never a
+  feature or cumulative OS update. It briefly starts `wuauserv` for the query
+  and puts it straight back to Disabled; `NoAutoUpdate` stays set throughout (it
+  only blocks *automatic* updating, not this explicit call). At first boot it
+  runs once unattended (`-Auto`) to pick up whatever the image is missing, then
+  registers a **weekly** scheduled task (`MinimalGaming-DriverCheck`, Sundays
+  ~1PM, catches up if the box was off). The weekly run is silent unless drivers
+  are actually offered — when they are, it shows a toast and opens a window that
+  lists them and asks Y/N. **Nothing installs automatically after first boot;
+  you always get the choice.** Run it by hand any time from
+  `C:\ProgramData\DriverUpdate\Update-Drivers.ps1` (elevated); delete the task
+  to stop the weekly check.
+
   This deliberately does **not** replace the shell. An earlier version of this
   project made powershell the `Winlogon\Shell` and hand-launched explorer;
   testing proved that explorer, started as a child process, never takes the
@@ -252,7 +270,8 @@ Both are git-ignored.)
 | `build-windows.ps1` | Fetches the official Microsoft ISO, extracts it, runs `build-time/slim-image.ps1`, injects the answer file + the `on-device/` scripts, rebuilds with `oscdimg`. **The one command you run.** |
 | `autounattend.xml` | The unattended answer file. Order 1 puts the GAMING splash up; Order 2 runs `first-boot-tweaks.ps1`. |
 | `build-time/slim-image.ps1` | The core size-reduction work — offline DISM servicing against `install.wim`. Can be re-run standalone against an already-extracted `build\extracted` folder while iterating, without re-downloading the source ISO. |
-| `on-device/first-boot-tweaks.ps1` | OneDrive removal + Edge runtime guard, Windows Update disable, telemetry-off/privacy pass, footprint service disables, performance power plan, Defender + **audio** safety nets, **latest GPU driver install** (vendors direct, since WU is off — AMD now silent-installs), Steam install + Big Picture autostart, and adopting the boot loader that covers the desktop during it all — runs once at first login. |
+| `on-device/first-boot-tweaks.ps1` | OneDrive removal + Edge runtime guard, Windows Update disable, telemetry-off/privacy pass, footprint service disables, performance power plan, Defender + **audio** safety nets, **latest GPU driver install** (vendors direct, since WU is off — AMD now silent-installs), **non-GPU driver install + a weekly driver check** (via `Update-Drivers.ps1`), Steam install + Big Picture autostart, and adopting the boot loader that covers the desktop during it all — runs once at first login. |
+| `on-device/Update-Drivers.ps1` | Driver-only updater that works while Windows Update is off — drives the Windows Update Agent COM API filtered to `Type='Driver'`, briefly starting `wuauserv` only for the query. `-Auto` (unattended install-all, used at first boot), `-Interactive` (list + Y/N prompt), `-Notify` (silent scan → toast + open the interactive window; what the weekly `MinimalGaming-DriverCheck` task runs). Staged onto the ISO by `build-windows.ps1`, wired up by `first-boot-tweaks.ps1`. |
 | `on-device/Start-GameMode.ps1` | Per-login launcher (fired by the `GameMode-Login` AtLogOn scheduled task): shows the animated loader and launches Steam straight into Big Picture (`-bigpicture`) on top of the normal desktop (explorer.exe stays the shell). Staged onto the ISO by `build-windows.ps1`, wired up by `first-boot-tweaks.ps1`. |
 | `on-device/Show-BootLoader.ps1` | The fullscreen "GAMING" boot loader — a black topmost splash with the moving starfield, a big logo, a progress ring with a spinning light, and a live status line (what's loading/installing). Driven by a status file so it animates smoothly while the caller does blocking installs. Used by both first boot and every login. |
 | `Win11-Minimal.iso` | **Not in this repo** — build artifact, see `.gitignore`. Build it yourself; redistributing Microsoft's install media isn't something this repo does. |
