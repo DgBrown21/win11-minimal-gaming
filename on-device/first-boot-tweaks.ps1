@@ -764,13 +764,14 @@ try {
             Write-Log "  No network — skipping the one-off driver pass; the weekly task will handle it." "Yellow"
         }
 
-        # 2. Weekly check. Interactive + Highest so it can both run the COM
-        #    installer (needs admin) AND show the install window on the desktop.
-        #    -Notify stays silent unless drivers are actually offered.
+        # 2. Weekly check. Hardware should stay current with no fuss, so the
+        #    weekly task runs -Auto: it silently installs any offered drivers
+        #    straight away (Highest so the COM installer, which needs admin, can
+        #    run). Hidden window; nothing to click.
         $taskUser = "$env:USERDOMAIN\$env:USERNAME"
         try {
             $drvAction    = New-ScheduledTaskAction -Execute "powershell.exe" `
-                -Argument "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$DriverScript`" -Notify"
+                -Argument "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$DriverScript`" -Auto"
             # RandomDelay (a TRIGGER property) spreads the run off a hard 1PM spike.
             $drvTrigger   = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 1:00PM -RandomDelay ([TimeSpan]::FromMinutes(30))
             $drvPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
@@ -780,7 +781,7 @@ try {
                 -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::FromHours(2))
             Register-ScheduledTask -TaskName "MinimalGaming-DriverCheck" -Action $drvAction -Trigger $drvTrigger `
                 -Principal $drvPrincipal -Settings $drvSettings -Force -ErrorAction Stop | Out-Null
-            Write-Log "  Registered weekly task 'MinimalGaming-DriverCheck' (Sundays ~1PM) to scan and offer driver updates."
+            Write-Log "  Registered weekly task 'MinimalGaming-DriverCheck' (Sundays ~1PM) to auto-install any offered driver updates."
         } catch {
             Write-Log "  Could not register the weekly driver-check task (non-fatal): $_" "Yellow"
         }
@@ -789,6 +790,59 @@ try {
     }
 } catch {
     Write-Log "  Driver-update setup failed (non-fatal): $_" "Yellow"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3f. WINDOWS (OS) UPDATES — detect + let the user choose (WU otherwise off)
+# ═══════════════════════════════════════════════════════════════════════════
+# Section 3 turned automatic Windows Update OFF. Update-Windows.ps1 restores an
+# EXPLICIT path for OS updates using the WU COM API filtered to Type='Software',
+# and SPLITS what it finds: SECURITY updates (MSRC severity, the Security-Updates
+# and Defender Definition-Updates categories — i.e. the monthly cumulative
+# security update and Defender defs) install automatically, straight away. Any
+# OTHER OS update (feature/version upgrades, non-security quality, .NET) is
+# offered to the user via a window: 1. Install now, 2. Delay 1 week, 3. Delay 2
+# weeks, 4. Delay 4 weeks, 5. Delay 1 year. A delay writes a snooze file the task
+# honours for those prompts only — security keeps installing weekly regardless.
+# The weekly task runs silently (-Notify) and only pops the window when a
+# non-security update is actually waiting and no delay is active.
+Write-Log "=== Windows (OS) updates (user-driven, WU otherwise off) ==="
+try {
+    $WuDir       = Join-Path $env:ProgramData "WindowsUpdateCheck"
+    New-Item -ItemType Directory -Path $WuDir -Force | Out-Null
+    $SrcWuUpdater = "C:\Windows\Setup\Scripts\Update-Windows.ps1"
+    $WuScript     = Join-Path $WuDir "Update-Windows.ps1"
+    if (Test-Path $SrcWuUpdater) {
+        Copy-Item -Path $SrcWuUpdater -Destination $WuScript -Force
+        Write-Log "  Staged Update-Windows.ps1 to $WuScript."
+
+        # Weekly check. Interactive + Highest so it can both run the COM
+        # installer (needs admin) AND show the choose/delay window on the
+        # desktop. -Notify stays silent unless OS updates are actually offered
+        # and no delay is currently active. Saturday, so it doesn't collide
+        # with the Sunday driver check.
+        $taskUser = "$env:USERDOMAIN\$env:USERNAME"
+        try {
+            $wuAction    = New-ScheduledTaskAction -Execute "powershell.exe" `
+                -Argument "-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$WuScript`" -Notify"
+            # RandomDelay (a TRIGGER property) spreads the run off a hard 1PM spike.
+            $wuTrigger   = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At 1:00PM -RandomDelay ([TimeSpan]::FromMinutes(30))
+            $wuPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Highest
+            # StartWhenAvailable makes a powered-off box catch up its missed run
+            # the next time it's on.
+            $wuSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::FromHours(3))
+            Register-ScheduledTask -TaskName "MinimalGaming-WindowsUpdateCheck" -Action $wuAction -Trigger $wuTrigger `
+                -Principal $wuPrincipal -Settings $wuSettings -Force -ErrorAction Stop | Out-Null
+            Write-Log "  Registered weekly task 'MinimalGaming-WindowsUpdateCheck' (Saturdays ~1PM) to detect OS updates and offer Install / delay."
+        } catch {
+            Write-Log "  Could not register the weekly Windows-update-check task (non-fatal): $_" "Yellow"
+        }
+    } else {
+        Write-Log "  Update-Windows.ps1 not found in Setup\Scripts — skipping Windows-update setup." "Yellow"
+    }
+} catch {
+    Write-Log "  Windows-update setup failed (non-fatal): $_" "Yellow"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1226,6 +1280,7 @@ Write-Log "Manual restore reminders (not scripted, no -Undo mode in this project
 Write-Log "  - Edge: https://www.microsoft.com/edge" "Cyan"
 Write-Log "  - OneDrive: https://www.microsoft.com/microsoft-365/onedrive/download" "Cyan"
 Write-Log "  - Windows Update: Settings > Windows Update, or remove the NoAutoUpdate policy value above and re-enable wuauserv/UsoSvc." "Cyan"
-Write-Log "  - Driver updates: run C:\ProgramData\DriverUpdate\Update-Drivers.ps1 (elevated) any time; the weekly 'MinimalGaming-DriverCheck' task offers them automatically. Remove that task to stop the weekly check." "Cyan"
+Write-Log "  - Driver updates: hardware installs straight away — the weekly 'MinimalGaming-DriverCheck' task runs C:\ProgramData\DriverUpdate\Update-Drivers.ps1 -Auto. Run it by hand (elevated) any time; remove the task to stop the weekly install." "Cyan"
+Write-Log "  - Windows (OS) updates: security updates install straight away; other OS updates are offered (Install / delay 1wk / 2wk / 4wk / 1yr) by the weekly 'MinimalGaming-WindowsUpdateCheck' task (C:\ProgramData\WindowsUpdateCheck\Update-Windows.ps1). Delete C:\ProgramData\WindowsUpdateCheck\snooze.txt to clear an active delay; remove the task to stop the weekly check." "Cyan"
 Write-Log "  - Autologon: remove AutoAdminLogon/DefaultUserName/DefaultDomainName from $WinlogonPath" "Cyan"
 Write-Log "Log saved to $LogFile"

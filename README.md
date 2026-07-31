@@ -118,12 +118,43 @@ different reliability characteristics:
   only blocks *automatic* updating, not this explicit call). At first boot it
   runs once unattended (`-Auto`) to pick up whatever the image is missing, then
   registers a **weekly** scheduled task (`MinimalGaming-DriverCheck`, Sundays
-  ~1PM, catches up if the box was off). The weekly run is silent unless drivers
-  are actually offered — when they are, it shows a toast and opens a window that
-  lists them and asks Y/N. **Nothing installs automatically after first boot;
-  you always get the choice.** Run it by hand any time from
-  `C:\ProgramData\DriverUpdate\Update-Drivers.ps1` (elevated); delete the task
-  to stop the weekly check.
+  ~1PM, catches up if the box was off) that **auto-installs** any offered
+  drivers straight away (`-Auto`, silent — hardware should stay current with no
+  fuss). Run it by hand any time from
+  `C:\ProgramData\DriverUpdate\Update-Drivers.ps1` (elevated); remove the task
+  to stop the weekly install.
+- **Windows (OS) updates — security applied automatically, everything else on
+  your terms, without turning automatic Windows Update back on**
+  (`on-device/Update-Windows.ps1`). The driver updater's OS-update counterpart:
+  it drives the same Windows Update Agent COM API but with a `Type='Software'`
+  filter, so it sees the cumulative/quality, .NET, Defender and feature updates
+  a normal machine would get — then **splits** them:
+
+  - **Security updates install straight away, automatically.** Anything with an
+    MSRC severity, plus the *Security Updates* and Defender *Definition Updates*
+    categories — i.e. the monthly cumulative security update and Defender
+    definitions — is downloaded and installed silently, no prompt.
+  - **Every other OS update** (feature/version upgrades, non-security quality
+    rollups, .NET, etc.) is offered in a window that lists them and asks:
+
+    1. **Install now**
+    2. **Delay 1 week**
+    3. **Delay 2 weeks**
+    4. **Delay 4 weeks**
+    5. **Delay 1 year**
+
+  A delay writes a snooze timestamp to
+  `C:\ProgramData\WindowsUpdateCheck\snooze.txt`; the weekly task stops
+  *prompting* until it expires (so *delay 1 year* really means no prompts for a
+  year) — but **security updates keep installing every week regardless of the
+  delay**. A **weekly** scheduled task (`MinimalGaming-WindowsUpdateCheck`,
+  Saturdays ~1PM, catches up if the box was off) does all of this: it applies
+  security silently, then only pops the window when a non-security update is
+  waiting and no delay is active. Like the driver path it briefly starts
+  `wuauserv` only for the work and puts it straight back to Disabled, with
+  `NoAutoUpdate` set throughout. Run it by hand any time from
+  `C:\ProgramData\WindowsUpdateCheck\Update-Windows.ps1` (elevated); delete
+  `snooze.txt` to clear an active delay, or remove the task to stop the check.
 
   This deliberately does **not** replace the shell. An earlier version of this
   project made powershell the `Winlogon\Shell` and hand-launched explorer;
