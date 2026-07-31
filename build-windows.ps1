@@ -42,17 +42,27 @@
     instead of fetching again (handshake links expire in ~24h, and
     re-running the whole build while iterating on slim-image.ps1 is slow
     otherwise).
+
+.PARAMETER OutDir
+    Directory to write the finished Win11-Minimal.iso into. Defaults to the
+    repo root (next to this script). The directory is created if it doesn't
+    exist — e.g. -OutDir "$env:USERPROFILE\Downloads" to drop it straight
+    into Downloads.
 #>
 param(
     [string]$OscdimgPath = "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe",
     [string]$WinSkuId = "20047",
-    [switch]$SkipDownload
+    [switch]$SkipDownload,
+    [string]$OutDir
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BuildDir = Join-Path $ScriptDir "build"
-$OutIso = Join-Path $ScriptDir "Win11-Minimal.iso"
+if (-not $OutDir) { $OutDir = $ScriptDir }
+New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+$OutDir = (Resolve-Path $OutDir).Path
+$OutIso = Join-Path $OutDir "Win11-Minimal.iso"
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "[ERR] This script must run elevated — the slim-image.ps1 stage needs Mount-WindowsImage/DISM, which require Administrator." -ForegroundColor Red
