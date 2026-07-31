@@ -91,33 +91,60 @@ if ($SkipDownload -and (Test-Path $isoDownloadPath)) {
     $OrgId = "y6jn8c31"
     $ProfileId = "606624d44113"
     $InstanceId = "560dc9f3-1aa5-4a2f-b63c-9e18f8d0e175"
-    $SessionId = [guid]::NewGuid().ToString()
     $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
-    $webSession = $null
-    Invoke-WebRequest -UseBasicParsing -SessionVariable webSession -UserAgent $ua `
-        -Uri "https://vlscppe.microsoft.com/tags?org_id=$OrgId&session_id=$SessionId" | Out-Null
+    # One full handshake attempt with a fresh session. Returns the download
+    # Uri, or $null if Microsoft's anti-bot layer handed back an empty/soft
+    # response (which it does intermittently — the layer is IP/session based).
+    function Resolve-DownloadUrl {
+        $SessionId = [guid]::NewGuid().ToString()
+        $webSession = $null
+        Invoke-WebRequest -UseBasicParsing -SessionVariable webSession -UserAgent $ua `
+            -Uri "https://vlscppe.microsoft.com/tags?org_id=$OrgId&session_id=$SessionId" | Out-Null
 
-    $mdt = Invoke-RestMethod -UseBasicParsing -WebSession $webSession -UserAgent $ua `
-        -Uri "https://ov-df.microsoft.com/mdt.js?instanceId=$InstanceId&PageId=si&session_id=$SessionId"
-    $w = $null; $rticks = $null
-    if ($mdt -match '[?&]w=([A-F0-9]+)') { $w = $matches[1] }
-    if ($mdt -match 'rticks="\+?(\d+)') { $rticks = $matches[1] }
-    if (-not $w -or -not $rticks) {
-        throw "Could not extract the w/rticks values from Microsoft's anti-bot handshake — their API may have changed since this script was written."
+        $mdt = Invoke-RestMethod -UseBasicParsing -WebSession $webSession -UserAgent $ua `
+            -Uri "https://ov-df.microsoft.com/mdt.js?instanceId=$InstanceId&PageId=si&session_id=$SessionId"
+        $w = $null; $rticks = $null
+        if ($mdt -match '[?&]w=([A-F0-9]+)') { $w = $matches[1] }
+        if ($mdt -match 'rticks="\+?(\d+)') { $rticks = $matches[1] }
+        if (-not $w -or -not $rticks) {
+            throw "Could not extract the w/rticks values from Microsoft's anti-bot handshake — their API may have changed since this script was written."
+        }
+
+        $mdtNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        Invoke-WebRequest -UseBasicParsing -WebSession $webSession -UserAgent $ua `
+            -Uri "https://ov-df.microsoft.com/?session_id=$SessionId&CustomerId=$InstanceId&PageId=si&w=$w&mdt=$mdtNow&rticks=$rticks" | Out-Null
+
+        $linksRaw = Invoke-RestMethod -UseBasicParsing -WebSession $webSession -UserAgent $ua `
+            -Headers @{ "Accept" = "application/json"; "Referer" = "https://www.microsoft.com/software-download/windows11" } `
+            -Uri "https://www.microsoft.com/software-download-connector/api/GetProductDownloadLinksBySku?profile=$ProfileId&productEditionId=undefined&SKU=$WinSkuId&friendlyFileName=undefined&Locale=en-US&sessionID=$SessionId"
+        # The body is often a JSON *string* containing JSON (double-encoded),
+        # so ConvertFrom-Json may need a second pass to reach the object.
+        $links = if ($linksRaw -is [string]) { $linksRaw | ConvertFrom-Json } else { $linksRaw }
+        if ($links -is [string]) { $links = $links | ConvertFrom-Json }
+        # Null-safe: a rate-limited response has no ProductDownloadOptions, so
+        # don't index into it blindly (that was the old "Cannot index into a
+        # null array" crash) — just return $null and let the caller retry.
+        $opts = $links.ProductDownloadOptions
+        if ($opts -and $opts.Count -gt 0) { return $opts[0].Uri }
+        return $null
     }
 
-    $mdtNow = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    Invoke-WebRequest -UseBasicParsing -WebSession $webSession -UserAgent $ua `
-        -Uri "https://ov-df.microsoft.com/?session_id=$SessionId&CustomerId=$InstanceId&PageId=si&w=$w&mdt=$mdtNow&rticks=$rticks" | Out-Null
-
-    $linksRaw = Invoke-RestMethod -UseBasicParsing -WebSession $webSession -UserAgent $ua `
-        -Headers @{ "Accept" = "application/json"; "Referer" = "https://www.microsoft.com/software-download/windows11" } `
-        -Uri "https://www.microsoft.com/software-download-connector/api/GetProductDownloadLinksBySku?profile=$ProfileId&productEditionId=undefined&SKU=$WinSkuId&friendlyFileName=undefined&Locale=en-US&sessionID=$SessionId"
-    $links = if ($linksRaw -is [string]) { $linksRaw | ConvertFrom-Json } else { $linksRaw }
-    $url = $links.ProductDownloadOptions[0].Uri
+    $url = $null
+    $maxAttempts = 6
+    for ($attempt = 1; $attempt -le $maxAttempts -and -not $url; $attempt++) {
+        try {
+            $url = Resolve-DownloadUrl
+        } catch {
+            Write-Host "  Attempt $attempt/$maxAttempts errored: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        if (-not $url -and $attempt -lt $maxAttempts) {
+            Write-Host "  Attempt $attempt/$maxAttempts got no link (Microsoft anti-bot throttling) — retrying in 15s..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 15
+        }
+    }
     if (-not $url) {
-        throw "No download link returned — Microsoft may have rate-limited this session (their anti-bot layer is IP/session based). Wait a while and retry."
+        throw "No download link after $maxAttempts attempts — Microsoft's anti-bot layer (IP/session based) is throttling this network. Wait ~15 min and retry, or download the ISO manually from https://www.microsoft.com/software-download/windows11 to build\windows11.iso and re-run with -SkipDownload."
     }
 
     Write-Host "==> Got a link (expires in ~24h). Downloading..."
