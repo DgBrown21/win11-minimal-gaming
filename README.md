@@ -202,6 +202,29 @@ Windows only. Needs **Administrator** (the slimming stage uses
 WIM→ESD compression (both CPU-bound). Every command below is in its own block
 so it can be copied with one click.
 
+### Quick build (recommended) — one launcher does everything
+
+Grab the code (step 1 below), then **double-click `Build-Iso.cmd`** in the repo
+folder. That's it. The launcher:
+
+- asks for admin (UAC) automatically,
+- **installs the one prerequisite for you** (the Windows ADK Deployment Tools,
+  if `oscdimg.exe` isn't already present),
+- runs the full build, and
+- drops **`Win11-Minimal.iso` into your `Downloads` folder**.
+
+The window stays open at the end showing the finished ISO path (or any error).
+Prefer a terminal? Run the same thing by hand:
+
+```powershell
+.\Build-Iso.ps1
+```
+
+To reuse an already-downloaded source ISO, pass it through: `.\Build-Iso.cmd -SkipDownload`.
+
+Everything below is the **manual, step-by-step** equivalent if you'd rather run
+each stage yourself.
+
 ### 1. Get the code
 
 With git:
@@ -282,7 +305,9 @@ time, the rest runs on the installed PC:
 
 ```
 win11-minimal-gaming/
-├─ build-windows.ps1      ← run this (elevated) to build the ISO
+├─ Build-Iso.cmd          ← double-click this: elevates, installs ADK, builds to Downloads
+├─ Build-Iso.ps1          ← what the .cmd runs (self-elevating one-shot wrapper)
+├─ build-windows.ps1      ← the actual build (called by Build-Iso; or run elevated yourself)
 ├─ autounattend.xml       ← unattended answer file, injected at build time
 ├─ build-time/
 │  └─ slim-image.ps1      ← offline DISM servicing, during the build only
